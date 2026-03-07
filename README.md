@@ -10,6 +10,5 @@ Vampire is a minimal Rust proxy for read-only PyPI, npm, and Cargo package insta
 
 ## Run
 ```bash
-cd projects/vampire
 VAMPIRE_MAX_CACHE_SIZE=10GiB cargo run
 ```

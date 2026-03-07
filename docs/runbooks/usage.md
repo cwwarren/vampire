@@ -2,7 +2,6 @@
 
 ## Start
 ```bash
-cd projects/vampire
 VAMPIRE_MAX_CACHE_SIZE=10GiB cargo run
 ```
 

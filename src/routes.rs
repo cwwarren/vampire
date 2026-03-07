@@ -107,27 +107,31 @@ pub fn rewrite_npm_json(
     origin: &str,
 ) -> Result<Vec<u8>, String> {
     let mut value: Value = serde_json::from_slice(body).map_err(|error| error.to_string())?;
-    let Some(versions) = value
+    rewrite_npm_dist(&mut value, upstreams, origin);
+    if let Some(versions) = value
         .get_mut("versions")
         .and_then(|value| value.as_object_mut())
-    else {
-        return serde_json::to_vec(&value).map_err(|error| error.to_string());
-    };
-    for version in versions.values_mut() {
-        let Some(dist) = version
-            .get_mut("dist")
-            .and_then(|value| value.as_object_mut())
-        else {
-            continue;
-        };
-        let Some(Value::String(url)) = dist.get_mut("tarball") else {
-            continue;
-        };
-        if let Some(rewritten) = rewrite_npm_tarball(url, upstreams, origin) {
-            *url = rewritten;
+    {
+        for version in versions.values_mut() {
+            rewrite_npm_dist(version, upstreams, origin);
         }
     }
     serde_json::to_vec(&value).map_err(|error| error.to_string())
+}
+
+fn rewrite_npm_dist(value: &mut Value, upstreams: &RegistryOrigins, origin: &str) {
+    let Some(dist) = value
+        .get_mut("dist")
+        .and_then(|value| value.as_object_mut())
+    else {
+        return;
+    };
+    let Some(Value::String(url)) = dist.get_mut("tarball") else {
+        return;
+    };
+    if let Some(rewritten) = rewrite_npm_tarball(url, upstreams, origin) {
+        *url = rewritten;
+    }
 }
 
 fn rewrite_pypi_href(href: &str, upstreams: &RegistryOrigins, origin: &str) -> String {
@@ -184,7 +188,8 @@ fn upstream_from_query(query: &str, base: &Url) -> Option<Url> {
 }
 
 fn join_url(base: &Url, path: &str) -> Option<Url> {
-    base.join(path).ok()
+    let url = base.join(path).ok()?;
+    matches_origin(&url, base).then_some(url)
 }
 
 fn matches_origin(url: &Url, base: &Url) -> bool {
@@ -270,6 +275,42 @@ mod tests {
                 .starts_with("http://localhost/npm/tarballs/pkg-1.0.0.tgz?u="),
             true
         );
+    }
+
+    #[test]
+    fn rewrites_root_npm_tarball() {
+        let upstreams = RegistryOrigins::default();
+        let body = serde_json::to_vec(&json!({
+            "name": "pkg",
+            "version": "1.0.0",
+            "dist": { "tarball": "https://registry.npmjs.org/pkg/-/pkg-1.0.0.tgz" }
+        }))
+        .unwrap();
+        let rewritten = serde_json::from_slice::<serde_json::Value>(
+            &rewrite_npm_json(&body, &upstreams, "http://localhost").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            rewritten["dist"]["tarball"]
+                .as_str()
+                .unwrap()
+                .starts_with("http://localhost/npm/tarballs/pkg-1.0.0.tgz?u="),
+            true
+        );
+    }
+
+    #[test]
+    fn rejects_absolute_npm_upstream_paths() {
+        let upstreams = RegistryOrigins::default();
+        assert!(npm_packument_url(&upstreams, "http://127.0.0.1:18080/").is_none());
+        assert!(npm_packument_url(&upstreams, "//127.0.0.1:18080/").is_none());
+    }
+
+    #[test]
+    fn rejects_absolute_cargo_index_paths() {
+        let upstreams = RegistryOrigins::default();
+        assert!(cargo_index_url(&upstreams, "http://127.0.0.1:18080/").is_none());
+        assert!(cargo_index_url(&upstreams, "//127.0.0.1:18080/").is_none());
     }
 
     #[test]

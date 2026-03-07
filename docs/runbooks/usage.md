@@ -5,6 +5,20 @@
 VAMPIRE_MAX_CACHE_SIZE=10GiB cargo run
 ```
 
+## Container
+```bash
+docker run --rm \
+  -p 8080:8080 \
+  -v vampire-cache:/var/lib/vampire \
+  -e VAMPIRE_MAX_CACHE_SIZE=10GiB \
+  ghcr.io/cwwarren/vampire:latest
+```
+
+Container defaults:
+- `VAMPIRE_BIND=0.0.0.0:8080`
+- `VAMPIRE_CACHE_DIR=/var/lib/vampire`
+- Published tags are `latest` and `sha-<full git sha>`
+
 ## Client Configuration
 ```bash
 pip install --index-url http://127.0.0.1:8080/pypi/simple/ <package>
@@ -41,3 +55,4 @@ cargo test --test real_e2e -- --ignored --test-threads=1 --nocapture
 - `pull_request` runs `cargo test` and the live suite in parallel for PR validation.
 - `push` runs only on `main`, so PR branches do not get an extra duplicate push workflow.
 - `push` to `main` runs the same two jobs and then uploads `target/release/vampire` as a workflow artifact.
+- `push` to `main` also publishes `ghcr.io/<owner>/vampire` with `latest` and `sha-<full git sha>` tags from the ARC runner.

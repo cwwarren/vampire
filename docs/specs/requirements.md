@@ -22,6 +22,12 @@
 - `GET|HEAD /cargo/index/...`
 - `GET|HEAD /cargo/api/v1/crates/{crate}/{version}/download`
 
+## Container Image
+- Publish an official image to `ghcr.io/<repo-owner>/vampire`.
+- Container defaults set `VAMPIRE_BIND=0.0.0.0:8080`.
+- Container defaults set `VAMPIRE_CACHE_DIR=/var/lib/vampire`.
+- Published tags are `latest` and `sha-<full git sha>`.
+
 ## Config
 - `VAMPIRE_MAX_CACHE_SIZE` required
 - `VAMPIRE_BIND` default `127.0.0.1:8080`

@@ -40,3 +40,33 @@ jobs:
           name: vampire-release-${{ github.sha }}
           path: target/release/vampire
           if-no-files-found: error
+
+  publish-image:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs:
+      - test
+      - real-e2e
+    runs-on: procyon-vampire
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE_NAME: ghcr.io/${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - name: Build image
+        run: >-
+          docker build --pull
+          --label org.opencontainers.image.title=vampire
+          --label org.opencontainers.image.description=Minimal\ Rust\ proxy\ for\ read-only\ PyPI,\ npm,\ and\ Cargo\ package\ installs
+          --label org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          --label org.opencontainers.image.revision=${{ github.sha }}
+          -t ${IMAGE_NAME}:latest
+          -t ${IMAGE_NAME}:sha-${{ github.sha }}
+          .
+      - name: Push image
+        run: |
+          docker push "${IMAGE_NAME}:latest"
+          docker push "${IMAGE_NAME}:sha-${{ github.sha }}"

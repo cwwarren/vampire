@@ -12,3 +12,14 @@ Vampire is a minimal Rust proxy for read-only PyPI, npm, and Cargo package insta
 ```bash
 VAMPIRE_MAX_CACHE_SIZE=10GiB cargo run
 ```
+
+## Container
+The official image is published to `ghcr.io/cwwarren/vampire`.
+
+```bash
+docker run --rm \
+  -p 8080:8080 \
+  -v vampire-cache:/var/lib/vampire \
+  -e VAMPIRE_MAX_CACHE_SIZE=10GiB \
+  ghcr.io/cwwarren/vampire:latest
+```

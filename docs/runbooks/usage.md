@@ -40,6 +40,7 @@ registry = "sparse+http://127.0.0.1:8080/cargo/index/"
 ## Operational Notes
 - One vampire process should own a cache directory.
 - `*.part` files are in-flight downloads and are cleaned on startup if stale.
+- Artifact misses are single-flight per cache key. Vampire waits for the full upstream artifact before replying, then serves the committed file.
 - The cache bound is soft during a successful commit and enforced immediately after the write finishes.
 - Failure logs are JSON lines on stderr with `event=request_failed`, `event=artifact_fetch_failed`, or `event=startup_failed`.
 

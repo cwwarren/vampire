@@ -1,5 +1,6 @@
 use crate::config::Config;
 use crate::routes::CacheClass;
+use bytes::Bytes;
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -56,22 +57,18 @@ pub struct CachePaths {
 }
 
 pub struct Inflight {
-    temp_path: PathBuf,
     state: Mutex<InflightState>,
     notify: Notify,
 }
 
 struct InflightState {
-    complete: bool,
-    error: Option<String>,
-    meta: Option<StoredResponseMeta>,
-    readers: usize,
-    remove_when_idle: bool,
-    bytes_written: u64,
+    outcome: Option<InflightOutcome>,
 }
 
-pub struct ReaderGuard {
-    inflight: Arc<Inflight>,
+#[derive(Clone)]
+pub enum InflightOutcome {
+    Cached,
+    Response(StoredResponseMeta, Bytes),
 }
 
 impl CacheStore {
@@ -142,7 +139,7 @@ impl CacheStore {
         if let Err(error) = lock_file.try_lock_exclusive() {
             return Err(io::Error::new(io::ErrorKind::WouldBlock, error));
         }
-        let inflight = Arc::new(Inflight::new(paths.temp.clone()));
+        let inflight = Arc::new(Inflight::new());
         inflight_map.insert(key.clone(), inflight.clone());
         Ok(ArtifactLookup::Leader(ArtifactLeader {
             inflight,
@@ -179,13 +176,17 @@ impl CacheStore {
         key: &str,
         meta: &StoredResponseMeta,
         temp_path: &Path,
-    ) -> io::Result<()> {
+    ) -> io::Result<StoredEntry> {
         let paths = self.paths_for(key);
         let meta_bytes = serde_json::to_vec(meta)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         fs::write(&paths.meta, meta_bytes).await?;
         fs::rename(temp_path, &paths.body).await?;
-        self.evict_to_bound().await
+        self.evict_to_bound().await?;
+        Ok(StoredEntry {
+            body_path: paths.body,
+            meta: meta.clone(),
+        })
     }
 
     pub async fn acquire_upstream_permit(&self) -> io::Result<OwnedSemaphorePermit> {
@@ -310,116 +311,60 @@ impl CacheStore {
 }
 
 impl Inflight {
-    pub(crate) fn new(temp_path: PathBuf) -> Self {
+    pub(crate) fn new() -> Self {
         Self {
-            temp_path,
-            state: Mutex::new(InflightState {
-                complete: false,
-                error: None,
-                meta: None,
-                readers: 0,
-                remove_when_idle: false,
-                bytes_written: 0,
-            }),
+            state: Mutex::new(InflightState { outcome: None }),
             notify: Notify::new(),
         }
     }
 
-    pub fn temp_path(&self) -> &Path {
-        &self.temp_path
-    }
-
-    pub async fn wait_for_headers(&self) -> io::Result<StoredResponseMeta> {
+    pub async fn wait_for_outcome(&self) -> io::Result<InflightOutcome> {
         loop {
             let state = self.state.lock().await;
-            if let Some(meta) = &state.meta {
-                return Ok(meta.clone());
-            }
-            if let Some(error) = &state.error {
-                return Err(io::Error::other(error.clone()));
+            if let Some(outcome) = &state.outcome {
+                return Ok(outcome.clone());
             }
             drop(state);
             self.notify.notified().await;
         }
     }
 
-    pub async fn snapshot(&self) -> InflightSnapshot {
-        let state = self.state.lock().await;
-        InflightSnapshot {
-            bytes_written: state.bytes_written,
-            complete: state.complete,
-            error: state.error.clone(),
-        }
-    }
-
-    pub async fn wait(&self) {
-        self.notify.notified().await;
-    }
-
-    pub async fn set_headers(&self, meta: StoredResponseMeta) {
+    pub async fn finish_cached(&self) {
         let mut state = self.state.lock().await;
-        state.meta = Some(meta);
+        state.outcome = Some(InflightOutcome::Cached);
         drop(state);
         self.notify.notify_waiters();
     }
 
-    pub async fn advance(&self, bytes: usize) {
+    pub async fn finish_response(&self, meta: StoredResponseMeta, body: Bytes) {
         let mut state = self.state.lock().await;
-        state.bytes_written += bytes as u64;
+        state.outcome = Some(InflightOutcome::Response(meta, body));
         drop(state);
         self.notify.notify_waiters();
     }
 
-    pub async fn finish(&self) {
+    pub async fn fail(&self, error: String) {
+        let content_length = error.len().to_string();
         let mut state = self.state.lock().await;
-        state.complete = true;
+        state.outcome = Some(InflightOutcome::Response(
+            StoredResponseMeta {
+                cache_class: CacheClass::Artifact,
+                headers: vec![
+                    ("content-length".to_owned(), content_length),
+                    (
+                        "content-type".to_owned(),
+                        "text/plain; charset=utf-8".to_owned(),
+                    ),
+                ],
+                last_modified: None,
+                etag: None,
+                status: 502,
+            },
+            Bytes::from(error),
+        ));
         drop(state);
         self.notify.notify_waiters();
     }
-
-    pub async fn fail(&self, error: String, cleanup: bool) {
-        let mut state = self.state.lock().await;
-        state.complete = true;
-        state.error = Some(error);
-        state.remove_when_idle = cleanup;
-        drop(state);
-        self.notify.notify_waiters();
-    }
-
-    pub async fn mark_cleanup(&self) {
-        let mut state = self.state.lock().await;
-        state.remove_when_idle = true;
-    }
-
-    pub async fn reader_guard(self: &Arc<Self>) -> ReaderGuard {
-        let mut state = self.state.lock().await;
-        state.readers += 1;
-        ReaderGuard {
-            inflight: self.clone(),
-        }
-    }
-}
-
-impl Drop for ReaderGuard {
-    fn drop(&mut self) {
-        let inflight = self.inflight.clone();
-        tokio::spawn(async move {
-            let mut state = inflight.state.lock().await;
-            state.readers = state.readers.saturating_sub(1);
-            let remove = state.readers == 0 && state.remove_when_idle;
-            let temp = inflight.temp_path.clone();
-            drop(state);
-            if remove {
-                let _ = fs::remove_file(temp).await;
-            }
-        });
-    }
-}
-
-pub struct InflightSnapshot {
-    pub bytes_written: u64,
-    pub complete: bool,
-    pub error: Option<String>,
 }
 
 struct CompletedEntry {

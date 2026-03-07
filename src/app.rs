@@ -1,4 +1,6 @@
-use crate::cache::{ArtifactLeader, ArtifactLookup, CacheStore, StoredEntry, StoredResponseMeta};
+use crate::cache::{
+    ArtifactLeader, ArtifactLookup, CacheStore, InflightOutcome, StoredEntry, StoredResponseMeta,
+};
 use crate::config::Config;
 use crate::failure_log::log_failure;
 use crate::routes::{
@@ -21,7 +23,7 @@ use std::convert::Infallible;
 use std::io;
 use std::sync::Arc;
 use tokio::fs;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 
 type ResponseBody = UnsyncBoxBody<Bytes, io::Error>;
@@ -264,124 +266,164 @@ impl App {
             ArtifactLookup::Hit(entry) => file_response(entry, false).await,
             ArtifactLookup::Join(inflight) => {
                 self.stats.record_artifact_join(upstream.as_str());
-                inflight_response(inflight).await
+                self.serve_inflight(&key, inflight).await
             }
-            ArtifactLookup::Leader(leader) => {
-                let inflight = leader.inflight.clone();
-                self.spawn_artifact_fetch(route, leader);
-                inflight_response(inflight).await
-            }
+            ArtifactLookup::Leader(leader) => self.fetch_artifact(route, leader).await,
         }
     }
 
-    fn spawn_artifact_fetch(&self, route: Route, leader: ArtifactLeader) {
-        let client = self.client.clone();
-        let cache = self.cache.clone();
-        let stats = self.stats.clone();
-        tokio::spawn(async move {
-            let upstream = route
-                .upstream()
-                .expect("artifact route always has upstream")
-                .clone();
-            let upstream_string = upstream.as_str().to_owned();
-            let fail = |stage: &str, error: &str| {
-                log_failure(
-                    "artifact_fetch_failed",
-                    json!({
-                        "stage": stage,
-                        "upstream": upstream_string,
-                        "cache_key": leader.key,
-                        "error": error,
-                    }),
-                );
-            };
-            let _permit = match cache.acquire_upstream_permit().await {
-                Ok(permit) => permit,
-                Err(error) => {
-                    fail("acquire_upstream_permit", &error.to_string());
-                    leader.inflight.fail(error.to_string(), true).await;
-                    cache.finish_inflight(&leader.key).await;
-                    return;
-                }
-            };
-            stats.record_fetch(CacheClass::Artifact, upstream.as_str());
-            if let Some(parent) = leader.paths.temp.parent() {
-                let _ = fs::create_dir_all(parent).await;
+    async fn serve_inflight(
+        &self,
+        key: &str,
+        inflight: Arc<crate::cache::Inflight>,
+    ) -> io::Result<Response<ResponseBody>> {
+        match inflight.wait_for_outcome().await? {
+            InflightOutcome::Cached => {
+                let entry = self.cache.load(key).await?.ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::NotFound,
+                        "artifact missing after inflight completion",
+                    )
+                })?;
+                file_response(entry, false).await
             }
-            let mut file = match fs::File::create(&leader.paths.temp).await {
-                Ok(file) => file,
+            InflightOutcome::Response(meta, body) => Ok(bytes_response(meta, body)),
+        }
+    }
+
+    async fn fetch_artifact(
+        &self,
+        route: Route,
+        leader: ArtifactLeader,
+    ) -> io::Result<Response<ResponseBody>> {
+        let upstream = route
+            .upstream()
+            .expect("artifact route always has upstream")
+            .clone();
+        let upstream_string = upstream.as_str().to_owned();
+        let fail = |stage: &str, error: &str| {
+            log_failure(
+                "artifact_fetch_failed",
+                json!({
+                    "stage": stage,
+                    "upstream": upstream_string,
+                    "cache_key": leader.key,
+                    "error": error,
+                }),
+            );
+        };
+        let _permit = match self.cache.acquire_upstream_permit().await {
+            Ok(permit) => permit,
+            Err(error) => {
+                fail("acquire_upstream_permit", &error.to_string());
+                leader.inflight.fail(error.to_string()).await;
+                self.cache.finish_inflight(&leader.key).await;
+                return Err(error);
+            }
+        };
+        self.stats
+            .record_fetch(CacheClass::Artifact, upstream.as_str());
+        let response = match self.client.get(upstream).send().await {
+            Ok(response) => response,
+            Err(error) => {
+                let error = io::Error::other(error);
+                fail("fetch_upstream", &error.to_string());
+                leader.inflight.fail(error.to_string()).await;
+                self.cache.finish_inflight(&leader.key).await;
+                return Err(error);
+            }
+        };
+        let status = response.status();
+        let headers = response.headers().clone();
+        if status != StatusCode::OK {
+            let body = match response.bytes().await {
+                Ok(body) => body,
                 Err(error) => {
-                    fail("create_temp_file", &error.to_string());
-                    leader.inflight.fail(error.to_string(), true).await;
-                    cache.finish_inflight(&leader.key).await;
-                    return;
+                    let error = io::Error::other(error);
+                    fail("read_error_response", &error.to_string());
+                    leader.inflight.fail(error.to_string()).await;
+                    self.cache.finish_inflight(&leader.key).await;
+                    return Err(error);
                 }
             };
-            let response = match client.get(upstream).send().await {
-                Ok(response) => response,
+            let meta = meta_for_bytes(CacheClass::Artifact, status, &headers, body.len());
+            leader
+                .inflight
+                .finish_response(meta.clone(), body.clone())
+                .await;
+            self.cache.finish_inflight(&leader.key).await;
+            return Ok(bytes_response(meta, body));
+        }
+        if let Some(parent) = leader.paths.temp.parent() {
+            if let Err(error) = fs::create_dir_all(parent).await {
+                fail("create_temp_dir", &error.to_string());
+                leader.inflight.fail(error.to_string()).await;
+                self.cache.finish_inflight(&leader.key).await;
+                return Err(error);
+            }
+        }
+        let mut file = match fs::File::create(&leader.paths.temp).await {
+            Ok(file) => file,
+            Err(error) => {
+                fail("create_temp_file", &error.to_string());
+                leader.inflight.fail(error.to_string()).await;
+                self.cache.finish_inflight(&leader.key).await;
+                return Err(error);
+            }
+        };
+        let mut response = response;
+        let mut content_length = 0;
+        loop {
+            let chunk = match response.chunk().await {
+                Ok(chunk) => chunk,
                 Err(error) => {
-                    fail("fetch_upstream", &error.to_string());
-                    leader.inflight.fail(error.to_string(), true).await;
-                    cache.finish_inflight(&leader.key).await;
-                    return;
+                    let error = io::Error::other(error);
+                    let _ = fs::remove_file(&leader.paths.temp).await;
+                    fail("read_upstream_stream", &error.to_string());
+                    leader.inflight.fail(error.to_string()).await;
+                    self.cache.finish_inflight(&leader.key).await;
+                    return Err(error);
                 }
             };
-            let status = response.status();
-            let meta = meta_from_upstream(CacheClass::Artifact, status, response.headers(), 0);
-            leader.inflight.set_headers(meta.clone()).await;
-            let mut stream = response.bytes_stream();
-            while let Some(chunk) = stream.next().await {
-                match chunk {
-                    Ok(chunk) => {
-                        if let Err(error) = file.write_all(&chunk).await {
-                            fail("write_temp_file", &error.to_string());
-                            leader.inflight.fail(error.to_string(), true).await;
-                            cache.finish_inflight(&leader.key).await;
-                            return;
-                        }
-                        leader.inflight.advance(chunk.len()).await;
-                    }
-                    Err(error) => {
-                        fail("read_upstream_stream", &error.to_string());
-                        leader.inflight.fail(error.to_string(), true).await;
-                        cache.finish_inflight(&leader.key).await;
-                        return;
-                    }
-                }
+            let Some(chunk) = chunk else {
+                break;
+            };
+            if let Err(error) = file.write_all(&chunk).await {
+                let _ = fs::remove_file(&leader.paths.temp).await;
+                fail("write_temp_file", &error.to_string());
+                leader.inflight.fail(error.to_string()).await;
+                self.cache.finish_inflight(&leader.key).await;
+                return Err(error);
             }
-            if let Err(error) = file.flush().await {
-                fail("flush_temp_file", &error.to_string());
-                leader.inflight.fail(error.to_string(), true).await;
-                cache.finish_inflight(&leader.key).await;
-                return;
-            }
+            content_length += chunk.len();
+        }
+        if let Err(error) = file.flush().await {
             drop(file);
-            let committed_meta = with_content_length(meta, &leader.paths.temp)
-                .await
-                .unwrap_or_else(|_| StoredResponseMeta {
-                    cache_class: CacheClass::Artifact,
-                    headers: vec![],
-                    last_modified: None,
-                    etag: None,
-                    status: status.as_u16(),
-                });
-            if status == StatusCode::OK {
-                if let Err(error) = cache
-                    .commit_artifact(&leader.key, &committed_meta, leader.inflight.temp_path())
-                    .await
-                {
-                    fail("commit_cache_entry", &error.to_string());
-                    leader.inflight.fail(error.to_string(), true).await;
-                    cache.finish_inflight(&leader.key).await;
-                    return;
-                }
-            } else {
-                leader.inflight.mark_cleanup().await;
+            let _ = fs::remove_file(&leader.paths.temp).await;
+            fail("flush_temp_file", &error.to_string());
+            leader.inflight.fail(error.to_string()).await;
+            self.cache.finish_inflight(&leader.key).await;
+            return Err(error);
+        }
+        drop(file);
+        let meta = meta_from_upstream(CacheClass::Artifact, status, &headers, content_length);
+        let entry = match self
+            .cache
+            .commit_artifact(&leader.key, &meta, &leader.paths.temp)
+            .await
+        {
+            Ok(entry) => entry,
+            Err(error) => {
+                let _ = fs::remove_file(&leader.paths.temp).await;
+                fail("commit_cache_entry", &error.to_string());
+                leader.inflight.fail(error.to_string()).await;
+                self.cache.finish_inflight(&leader.key).await;
+                return Err(error);
             }
-            leader.inflight.finish().await;
-            let _ = leader.lock_file.unlock();
-            cache.finish_inflight(&leader.key).await;
-        });
+        };
+        leader.inflight.finish_cached().await;
+        self.cache.finish_inflight(&leader.key).await;
+        file_response(entry, false).await
     }
 }
 
@@ -465,20 +507,6 @@ fn meta_for_bytes(
     meta
 }
 
-async fn with_content_length(
-    mut meta: StoredResponseMeta,
-    path: &std::path::Path,
-) -> io::Result<StoredResponseMeta> {
-    let metadata = fs::metadata(path).await?;
-    meta.headers
-        .retain(|(name, _)| !name.eq_ignore_ascii_case(CONTENT_LENGTH.as_str()));
-    meta.headers.push((
-        CONTENT_LENGTH.as_str().to_owned(),
-        metadata.len().to_string(),
-    ));
-    Ok(meta)
-}
-
 async fn file_response(entry: StoredEntry, empty: bool) -> io::Result<Response<ResponseBody>> {
     let mut response = Response::builder()
         .status(StatusCode::from_u16(entry.meta.status).unwrap_or(StatusCode::OK));
@@ -519,70 +547,6 @@ fn empty_response_from_meta(meta: StoredResponseMeta) -> Response<ResponseBody> 
         &meta.headers,
     );
     response.body(empty_body()).expect("head response")
-}
-
-async fn inflight_response(
-    inflight: Arc<crate::cache::Inflight>,
-) -> io::Result<Response<ResponseBody>> {
-    let meta = inflight.wait_for_headers().await?;
-    loop {
-        let snapshot = inflight.snapshot().await;
-        if snapshot.bytes_written > 0 || snapshot.complete {
-            break;
-        }
-        inflight.wait().await;
-    }
-    let reader_guard = inflight.reader_guard().await;
-    let path = inflight.temp_path().to_path_buf();
-    let stream = async_stream::try_stream! {
-        let _reader_guard = reader_guard;
-        let mut file = loop {
-            match fs::File::open(&path).await {
-                Ok(file) => break file,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                    let snapshot = inflight.snapshot().await;
-                    if let Some(error) = snapshot.error {
-                        Err(io::Error::other(error))?;
-                    }
-                    inflight.wait().await;
-                }
-                Err(error) => Err(error)?,
-            }
-        };
-        let mut offset = 0_u64;
-        let mut buffer = vec![0_u8; 64 * 1024];
-        loop {
-            let snapshot = inflight.snapshot().await;
-            if offset < snapshot.bytes_written {
-                let available = (snapshot.bytes_written - offset) as usize;
-                let to_read = available.min(buffer.len());
-                let read = file.read(&mut buffer[..to_read]).await?;
-                if read == 0 {
-                    inflight.wait().await;
-                    continue;
-                }
-                offset += read as u64;
-                yield Frame::data(Bytes::copy_from_slice(&buffer[..read]));
-                continue;
-            }
-            if let Some(error) = snapshot.error {
-                Err(io::Error::other(error))?;
-            }
-            if snapshot.complete {
-                break;
-            }
-            inflight.wait().await;
-        }
-    };
-    let mut response =
-        Response::builder().status(StatusCode::from_u16(meta.status).unwrap_or(StatusCode::OK));
-    apply_headers(
-        response.headers_mut().expect("response headers"),
-        &meta.headers,
-    );
-    Ok(response
-        .body(StreamBody::new(stream).boxed_unsync())
-        .expect("inflight response"))
 }
 
 fn apply_headers(headers: &mut HeaderMap, pairs: &[(String, String)]) {
@@ -663,56 +627,4 @@ fn empty_body() -> ResponseBody {
 
 fn never_to_io(never: Infallible) -> io::Error {
     match never {}
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{StoredResponseMeta, inflight_response};
-    use crate::cache::Inflight;
-    use crate::routes::CacheClass;
-    use bytes::Bytes;
-    use http_body_util::BodyExt;
-    use std::io;
-    use std::sync::Arc;
-    use tempfile::tempdir;
-    use tokio::fs;
-    use tokio::time::{Duration, timeout};
-
-    #[tokio::test]
-    async fn inflight_response_waits_for_first_bytes() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("artifact.part");
-        fs::File::create(&path).await.unwrap();
-        let inflight = Arc::new(Inflight::new(path.clone()));
-        let mut response = Box::pin(inflight_response(inflight.clone()));
-        inflight
-            .set_headers(StoredResponseMeta {
-                cache_class: CacheClass::Artifact,
-                headers: vec![],
-                last_modified: None,
-                etag: None,
-                status: 200,
-            })
-            .await;
-        assert!(
-            timeout(Duration::from_millis(50), response.as_mut())
-                .await
-                .is_err()
-        );
-        fs::write(&path, b"abc").await.unwrap();
-        inflight.advance(3).await;
-        inflight.finish().await;
-        let response = timeout(Duration::from_secs(1), response.as_mut())
-            .await
-            .unwrap()
-            .unwrap();
-        let body = response
-            .into_body()
-            .collect()
-            .await
-            .map_err(io::Error::other)
-            .unwrap()
-            .to_bytes();
-        assert_eq!(body, Bytes::from_static(b"abc"));
-    }
 }

@@ -55,5 +55,4 @@ cargo test --test real_e2e -- --ignored --test-threads=1 --nocapture
 - Do not combine `self-hosted` with the ARC scale-set name in `runs-on`.
 - `pull_request` runs `cargo test` and the live suite in parallel for PR validation.
 - `push` runs only on `main`, so PR branches do not get an extra duplicate push workflow.
-- `push` to `main` runs the same two jobs and then uploads `target/release/vampire` as a workflow artifact.
 - `push` to `main` also publishes `ghcr.io/<owner>/vampire` with `latest` and `sha-<full git sha>` tags from the ARC runner.

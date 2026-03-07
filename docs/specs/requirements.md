@@ -31,6 +31,7 @@
 
 ## Cache Rules
 - Artifacts are cached by canonical upstream URL until evicted.
+- On an artifact miss, a streaming response does not begin until vampire has at least the first body bytes or the artifact fetch has completed.
 - Metadata is cached only when upstream returns `ETag` or `Last-Modified`.
 - Eviction is oldest-first by completed file mtime.
 - Successful writes may overshoot temporarily; janitor eviction restores the bound after commit.

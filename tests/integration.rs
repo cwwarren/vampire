@@ -1,16 +1,14 @@
+use axum::Router;
+use axum::body::Body;
+use axum::extract::State;
+use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, Uri};
+use axum::response::Response;
+use axum::routing::any;
+use bytes::Bytes;
 use futures_util::future::join_all;
-use http::StatusCode;
-use http_body_util::{BodyExt, Full, StreamBody, combinators::UnsyncBoxBody};
-use hyper::body::Frame;
-use hyper::body::Incoming;
-use hyper::service::service_fn;
-use hyper::{Request, Response};
-use hyper_util::rt::{TokioExecutor, TokioIo};
-use hyper_util::server::conn::auto::Builder as ServerBuilder;
 use reqwest::Client;
 use serde_json::json;
 use std::collections::HashMap;
-use std::convert::Infallible;
 use std::io;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -22,8 +20,6 @@ use tokio::sync::Mutex;
 use tokio::time::{Duration, Instant};
 use vampire::routes::RegistryOrigins;
 use vampire::{App, Config};
-
-type TestBody = UnsyncBoxBody<bytes::Bytes, io::Error>;
 
 #[tokio::test]
 async fn rejects_unknown_routes() {
@@ -175,6 +171,100 @@ async fn revalidates_metadata() {
 }
 
 #[tokio::test]
+async fn routes_scoped_npm_packuments_without_decoding_scope_separator() {
+    let upstream = Upstream::new().await.unwrap();
+    upstream
+        .insert(
+            "/@scope%2Fname",
+            UpstreamResponse::json(
+                200,
+                json!({
+                    "name": "@scope/name",
+                    "dist": {
+                        "tarball": "https://registry.npmjs.org/@scope/name/-/name-1.0.0.tgz"
+                    }
+                }),
+            ),
+        )
+        .await;
+    let fixture = TestFixture::with_servers(upstream.clone()).await.unwrap();
+    let response = fixture
+        .client
+        .get(format!("{}/npm/@scope%2Fname", fixture.base_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body =
+        serde_json::from_slice::<serde_json::Value>(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(upstream.request_count("/@scope%2Fname").await, 1);
+    assert!(
+        body["dist"]["tarball"]
+            .as_str()
+            .unwrap()
+            .starts_with(&format!(
+                "{}/npm/tarballs/name-1.0.0.tgz?u=",
+                fixture.base_url
+            ))
+    );
+}
+
+#[tokio::test]
+async fn cold_metadata_requests_run_in_parallel() {
+    let upstream = Upstream::new().await.unwrap();
+    upstream
+        .insert(
+            "/npm-a",
+            UpstreamResponse::slow_json(
+                200,
+                json!({
+                    "versions": {
+                        "1.0.0": {
+                            "dist": { "tarball": "https://registry.npmjs.org/npm-a/-/npm-a-1.0.0.tgz" }
+                        }
+                    }
+                }),
+                Duration::from_millis(250),
+            ),
+        )
+        .await;
+    upstream
+        .insert(
+            "/npm-b",
+            UpstreamResponse::slow_json(
+                200,
+                json!({
+                    "versions": {
+                        "1.0.0": {
+                            "dist": { "tarball": "https://registry.npmjs.org/npm-b/-/npm-b-1.0.0.tgz" }
+                        }
+                    }
+                }),
+                Duration::from_millis(250),
+            ),
+        )
+        .await;
+    let fixture = TestFixture::with_servers(upstream).await.unwrap();
+    let start = Instant::now();
+    let first = fixture
+        .client
+        .get(format!("{}/npm/npm-a", fixture.base_url))
+        .send();
+    let second = fixture
+        .client
+        .get(format!("{}/npm/npm-b", fixture.base_url))
+        .send();
+    let (first, second) = tokio::join!(first, second);
+    assert_eq!(first.unwrap().status(), StatusCode::OK);
+    assert_eq!(second.unwrap().status(), StatusCode::OK);
+    assert!(
+        start.elapsed() < Duration::from_millis(450),
+        "metadata requests serialized unexpectedly: {:?}",
+        start.elapsed()
+    );
+}
+
+#[tokio::test]
 async fn serves_cargo_config() {
     let fixture = TestFixture::new().await.unwrap();
     let response = fixture
@@ -252,25 +342,11 @@ impl Upstream {
             routes: Arc::new(Mutex::new(HashMap::new())),
             counts: Arc::new(Mutex::new(HashMap::new())),
         };
-        let state = upstream.clone();
+        let router = Router::new()
+            .fallback(any(upstream_handle))
+            .with_state(upstream.clone());
         tokio::spawn(async move {
-            loop {
-                let (stream, _) = match listener.accept().await {
-                    Ok(pair) => pair,
-                    Err(_) => break,
-                };
-                let state = state.clone();
-                tokio::spawn(async move {
-                    let service = service_fn(move |request| {
-                        let state = state.clone();
-                        async move { Ok::<_, Infallible>(state.handle(request).await) }
-                    });
-                    let io = TokioIo::new(stream);
-                    let _ = ServerBuilder::new(TokioExecutor::new())
-                        .serve_connection(io, service)
-                        .await;
-                });
-            }
+            let _ = axum::serve(listener, router).await;
         });
         Ok(upstream)
     }
@@ -297,41 +373,37 @@ impl Upstream {
             .map(|value| value.load(Ordering::SeqCst))
             .unwrap_or(0)
     }
+}
 
-    async fn handle(&self, request: Request<Incoming>) -> Response<TestBody> {
-        let path = request.uri().path().to_owned();
-        if let Some(counter) = self.counts.lock().await.get(&path).cloned() {
-            counter.fetch_add(1, Ordering::SeqCst);
-        }
-        let mut routes = self.routes.lock().await;
-        let Some(queue) = routes.get_mut(&path) else {
-            return Response::builder()
-                .status(404)
-                .body(
-                    Full::new(bytes::Bytes::from_static(b"missing"))
-                        .map_err(never)
-                        .boxed_unsync(),
-                )
-                .unwrap();
-        };
-        let mut response = queue
-            .first()
-            .cloned()
-            .unwrap_or_else(|| UpstreamResponse::empty(404));
-        if queue.len() > 1 {
-            response = queue.remove(0);
-        }
-        if let Some(expected) = &response.if_none_match {
-            let actual = request
-                .headers()
-                .get("if-none-match")
-                .and_then(|value| value.to_str().ok());
-            if actual != Some(expected.as_str()) {
-                response = UpstreamResponse::empty(412);
-            }
-        }
-        response.into_response()
+async fn upstream_handle(
+    State(upstream): State<Upstream>,
+    uri: Uri,
+    headers: HeaderMap,
+) -> Response {
+    let path = uri.path().to_owned();
+    if let Some(counter) = upstream.counts.lock().await.get(&path).cloned() {
+        counter.fetch_add(1, Ordering::SeqCst);
     }
+    let mut routes = upstream.routes.lock().await;
+    let Some(queue) = routes.get_mut(&path) else {
+        return text_response(404, "missing");
+    };
+    let mut response = queue
+        .first()
+        .cloned()
+        .unwrap_or_else(|| UpstreamResponse::empty(404));
+    if queue.len() > 1 {
+        response = queue.remove(0);
+    }
+    if let Some(expected) = &response.if_none_match {
+        let actual = headers
+            .get("if-none-match")
+            .and_then(|value| value.to_str().ok());
+        if actual != Some(expected.as_str()) {
+            response = UpstreamResponse::empty(412);
+        }
+    }
+    response.into_response()
 }
 
 #[derive(Clone)]
@@ -411,6 +483,18 @@ impl UpstreamResponse {
         }
     }
 
+    fn slow_json(status: u16, body: serde_json::Value, pause: Duration) -> Self {
+        let bytes = serde_json::to_vec(&body).unwrap();
+        let midpoint = bytes.len() / 2;
+        Self::slow_bytes(
+            status,
+            "application/json",
+            bytes[..midpoint].to_vec(),
+            bytes[midpoint..].to_vec(),
+            pause,
+        )
+    }
+
     fn with_header(mut self, name: &str, value: &str) -> Self {
         self.headers.push((name.to_owned(), value.to_owned()));
         self
@@ -421,38 +505,31 @@ impl UpstreamResponse {
         self
     }
 
-    fn into_response(self) -> Response<TestBody> {
-        let mut response = Response::builder().status(self.status);
-        let headers = response.headers_mut().unwrap();
-        for (name, value) in self.headers {
-            headers.insert(
-                http::header::HeaderName::from_bytes(name.as_bytes()).unwrap(),
-                http::header::HeaderValue::from_str(&value).unwrap(),
-            );
-        }
-        match self.body {
-            UpstreamBody::Full(body) => response
-                .body(
-                    Full::new(bytes::Bytes::from(body))
-                        .map_err(never)
-                        .boxed_unsync(),
-                )
-                .unwrap(),
+    fn into_response(self) -> Response {
+        let mut response = Response::new(match self.body {
+            UpstreamBody::Full(body) => Body::from(body),
             UpstreamBody::Slow {
                 first,
                 second,
                 pause,
             } => {
-                let stream = async_stream::try_stream! {
-                    yield Frame::data(bytes::Bytes::from(first));
+                let stream = async_stream::stream! {
+                    yield Ok::<Bytes, io::Error>(Bytes::from(first));
                     tokio::time::sleep(pause).await;
-                    yield Frame::data(bytes::Bytes::from(second));
+                    yield Ok::<Bytes, io::Error>(Bytes::from(second));
                 };
-                response
-                    .body(StreamBody::new(stream).boxed_unsync())
-                    .unwrap()
+                Body::from_stream(stream)
             }
+        });
+        *response.status_mut() = StatusCode::from_u16(self.status).unwrap();
+        let headers = response.headers_mut();
+        for (name, value) in self.headers {
+            headers.insert(
+                HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                HeaderValue::from_str(&value).unwrap(),
+            );
         }
+        response
     }
 }
 
@@ -460,6 +537,8 @@ async fn listen_addr() -> io::Result<SocketAddr> {
     Ok(TcpListener::bind("127.0.0.1:0").await?.local_addr()?)
 }
 
-fn never(never: std::convert::Infallible) -> io::Error {
-    match never {}
+fn text_response(status: u16, body: &str) -> Response {
+    let mut response = Response::new(Body::from(body.to_owned()));
+    *response.status_mut() = StatusCode::from_u16(status).unwrap();
+    response
 }

@@ -10,18 +10,6 @@ pub enum CacheClass {
     Metadata,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum Route {
-    CargoConfig { origin: String },
-    CargoDownload { upstream: Url },
-    CargoIndex { upstream: Url },
-    NpmPackument { origin: String, upstream: Url },
-    NpmTarball { upstream: Url },
-    PypiFile { upstream: Url },
-    PypiSimpleProject { origin: String, upstream: Url },
-    PypiSimpleRoot { origin: String, upstream: Url },
-}
-
 #[derive(Clone, Debug)]
 pub struct RegistryOrigins {
     pub cargo_download: Url,
@@ -43,127 +31,56 @@ impl Default for RegistryOrigins {
     }
 }
 
-impl Route {
-    pub fn cache_class(&self) -> Option<CacheClass> {
-        match self {
-            Self::CargoConfig { .. } => None,
-            Self::CargoDownload { .. } | Self::NpmTarball { .. } | Self::PypiFile { .. } => {
-                Some(CacheClass::Artifact)
-            }
-            Self::CargoIndex { .. }
-            | Self::NpmPackument { .. }
-            | Self::PypiSimpleProject { .. }
-            | Self::PypiSimpleRoot { .. } => Some(CacheClass::Metadata),
-        }
-    }
-
-    pub fn upstream(&self) -> Option<&Url> {
-        match self {
-            Self::CargoConfig { .. } => None,
-            Self::CargoDownload { upstream }
-            | Self::CargoIndex { upstream }
-            | Self::NpmPackument { upstream, .. }
-            | Self::NpmTarball { upstream }
-            | Self::PypiFile { upstream }
-            | Self::PypiSimpleProject { upstream, .. }
-            | Self::PypiSimpleRoot { upstream, .. } => Some(upstream),
-        }
-    }
-}
-
-pub fn route_request(
-    path: &str,
-    query: Option<&str>,
-    origin: String,
-    upstreams: &RegistryOrigins,
-) -> Option<Route> {
-    if path == "/cargo/index/config.json" {
-        return Some(Route::CargoConfig { origin });
-    }
-    if let Some(raw) = path.strip_prefix("/cargo/index/") {
-        return Some(Route::CargoIndex {
-            upstream: join_url(&upstreams.cargo_index, raw)?,
-        });
-    }
-    if let Some(raw) = path.strip_prefix("/cargo/api/v1/crates/") {
-        let mut pieces = raw.split('/');
-        let crate_name = pieces.next()?;
-        let version = pieces.next()?;
-        if pieces.next()? != "download" || pieces.next().is_some() {
-            return None;
-        }
-        return Some(Route::CargoDownload {
-            upstream: join_url(
-                &upstreams.cargo_download,
-                &format!("crates/{crate_name}/{crate_name}-{version}.crate"),
-            )?,
-        });
-    }
-    if path == "/pypi/simple/" {
-        return Some(Route::PypiSimpleRoot {
-            origin,
-            upstream: join_url(&upstreams.pypi_simple, "simple/")?,
-        });
-    }
-    if let Some(project) = path.strip_prefix("/pypi/simple/") {
-        if let Some(project) = project.strip_suffix('/') {
-            if !project.is_empty() && !project.contains('/') {
-                return Some(Route::PypiSimpleProject {
-                    origin,
-                    upstream: join_url(&upstreams.pypi_simple, &format!("simple/{project}/"))?,
-                });
-            }
-        }
-        return None;
-    }
-    if let Some(filename) = path.strip_prefix("/pypi/files/") {
-        if filename.is_empty() || filename.contains('/') {
-            return None;
-        }
-        let upstream = upstream_from_query(query?, &upstreams.pypi_files)?;
-        return Some(Route::PypiFile { upstream });
-    }
-    if let Some(filename) = path.strip_prefix("/npm/tarballs/") {
-        if filename.is_empty() || filename.contains('/') {
-            return None;
-        }
-        let upstream = upstream_from_query(query?, &upstreams.npm)?;
-        return Some(Route::NpmTarball { upstream });
-    }
-    if let Some(package) = path.strip_prefix("/npm/") {
-        if package.is_empty() {
-            return None;
-        }
-        return Some(Route::NpmPackument {
-            origin,
-            upstream: join_url(&upstreams.npm, package)?,
-        });
-    }
-    None
-}
-
 pub fn cargo_config(origin: &str) -> Vec<u8> {
     serde_json::json!({ "dl": format!("{origin}/cargo/api/v1/crates") })
         .to_string()
         .into_bytes()
 }
 
-pub fn rewrite_metadata(
-    route: &Route,
-    body: &[u8],
+pub fn cargo_index_url(upstreams: &RegistryOrigins, path: &str) -> Option<Url> {
+    join_url(&upstreams.cargo_index, path)
+}
+
+pub fn cargo_download_url(
     upstreams: &RegistryOrigins,
-) -> Result<Vec<u8>, String> {
-    match route {
-        Route::PypiSimpleRoot { origin, .. } | Route::PypiSimpleProject { origin, .. } => {
-            rewrite_pypi_html(body, upstreams, origin)
+    crate_name: &str,
+    version: &str,
+) -> Option<Url> {
+    join_url(
+        &upstreams.cargo_download,
+        &format!("crates/{crate_name}/{crate_name}-{version}.crate"),
+    )
+}
+
+pub fn pypi_simple_url(upstreams: &RegistryOrigins, project: Option<&str>) -> Option<Url> {
+    match project {
+        None => join_url(&upstreams.pypi_simple, "simple/"),
+        Some(project) => {
+            let project = project.strip_suffix('/')?;
+            if project.is_empty() || project.contains('/') {
+                return None;
+            }
+            join_url(&upstreams.pypi_simple, &format!("simple/{project}/"))
         }
-        Route::NpmPackument { origin, .. } => rewrite_npm_json(body, upstreams, origin),
-        Route::CargoIndex { .. } => Ok(body.to_vec()),
-        _ => Ok(body.to_vec()),
     }
 }
 
-fn rewrite_pypi_html(
+pub fn pypi_file_url(query: Option<&str>, upstreams: &RegistryOrigins) -> Option<Url> {
+    upstream_from_query(query?, &upstreams.pypi_files)
+}
+
+pub fn npm_packument_url(upstreams: &RegistryOrigins, package: &str) -> Option<Url> {
+    if package.is_empty() {
+        return None;
+    }
+    join_url(&upstreams.npm, package)
+}
+
+pub fn npm_tarball_url(query: Option<&str>, upstreams: &RegistryOrigins) -> Option<Url> {
+    upstream_from_query(query?, &upstreams.npm)
+}
+
+pub fn rewrite_pypi_html(
     body: &[u8],
     upstreams: &RegistryOrigins,
     origin: &str,
@@ -182,6 +99,39 @@ fn rewrite_pypi_html(
         format!("href='{rewritten}'")
     });
     Ok(output.into_owned().into_bytes())
+}
+
+pub fn rewrite_npm_json(
+    body: &[u8],
+    upstreams: &RegistryOrigins,
+    origin: &str,
+) -> Result<Vec<u8>, String> {
+    let mut value: Value = serde_json::from_slice(body).map_err(|error| error.to_string())?;
+    rewrite_npm_dist(&mut value, upstreams, origin);
+    if let Some(versions) = value
+        .get_mut("versions")
+        .and_then(|value| value.as_object_mut())
+    {
+        for version in versions.values_mut() {
+            rewrite_npm_dist(version, upstreams, origin);
+        }
+    }
+    serde_json::to_vec(&value).map_err(|error| error.to_string())
+}
+
+fn rewrite_npm_dist(value: &mut Value, upstreams: &RegistryOrigins, origin: &str) {
+    let Some(dist) = value
+        .get_mut("dist")
+        .and_then(|value| value.as_object_mut())
+    else {
+        return;
+    };
+    let Some(Value::String(url)) = dist.get_mut("tarball") else {
+        return;
+    };
+    if let Some(rewritten) = rewrite_npm_tarball(url, upstreams, origin) {
+        *url = rewritten;
+    }
 }
 
 fn rewrite_pypi_href(href: &str, upstreams: &RegistryOrigins, origin: &str) -> String {
@@ -214,41 +164,6 @@ fn rewrite_pypi_href(href: &str, upstreams: &RegistryOrigins, origin: &str) -> S
     href.to_owned()
 }
 
-fn rewrite_npm_json(
-    body: &[u8],
-    upstreams: &RegistryOrigins,
-    origin: &str,
-) -> Result<Vec<u8>, String> {
-    let mut value: Value = serde_json::from_slice(body).map_err(|error| error.to_string())?;
-    rewrite_npm_value(&mut value, upstreams, origin);
-    serde_json::to_vec(&value).map_err(|error| error.to_string())
-}
-
-fn rewrite_npm_value(value: &mut Value, upstreams: &RegistryOrigins, origin: &str) {
-    match value {
-        Value::Object(map) => {
-            if let Some(dist) = map.get_mut("dist") {
-                if let Some(dist_map) = dist.as_object_mut() {
-                    if let Some(Value::String(url)) = dist_map.get_mut("tarball") {
-                        if let Some(rewritten) = rewrite_npm_tarball(url, upstreams, origin) {
-                            *url = rewritten;
-                        }
-                    }
-                }
-            }
-            for child in map.values_mut() {
-                rewrite_npm_value(child, upstreams, origin);
-            }
-        }
-        Value::Array(values) => {
-            for child in values {
-                rewrite_npm_value(child, upstreams, origin);
-            }
-        }
-        _ => {}
-    }
-}
-
 fn rewrite_npm_tarball(input: &str, upstreams: &RegistryOrigins, origin: &str) -> Option<String> {
     let url = Url::parse(input).ok()?;
     if !matches_origin(&url, &upstreams.npm) && url.host_str() != Some("registry.npmjs.org") {
@@ -273,7 +188,11 @@ fn upstream_from_query(query: &str, base: &Url) -> Option<Url> {
 }
 
 fn join_url(base: &Url, path: &str) -> Option<Url> {
-    base.join(path).ok()
+    if path.starts_with('/') || path.starts_with("//") || Url::parse(path).is_ok() {
+        return None;
+    }
+    let url = Url::parse(&format!("{}{path}", base.as_str())).ok()?;
+    matches_origin(&url, base).then_some(url)
 }
 
 fn matches_origin(url: &Url, base: &Url) -> bool {
@@ -296,51 +215,43 @@ fn href_regex() -> &'static Regex {
 
 #[cfg(test)]
 mod tests {
-    use super::{RegistryOrigins, cargo_config, rewrite_metadata, route_request};
+    use super::{
+        RegistryOrigins, cargo_config, cargo_download_url, cargo_index_url, npm_packument_url,
+        npm_tarball_url, pypi_file_url, pypi_simple_url, rewrite_npm_json, rewrite_pypi_html,
+    };
     use serde_json::json;
 
     #[test]
-    fn routes_requests() {
+    fn builds_urls() {
         let upstreams = RegistryOrigins::default();
-        let route = route_request(
-            "/cargo/index/config.json",
-            None,
-            "http://localhost".to_owned(),
-            &upstreams,
+        assert!(cargo_index_url(&upstreams, "config.json").is_some());
+        assert!(cargo_download_url(&upstreams, "serde", "1.0.0").is_some());
+        assert!(npm_packument_url(&upstreams, "@scope%2fname").is_some());
+        assert!(pypi_simple_url(&upstreams, Some("pkg/")).is_some());
+        assert!(
+            pypi_file_url(
+                Some("u=https%3A%2F%2Ffiles.pythonhosted.org%2Fpackages%2Fpkg.whl"),
+                &upstreams
+            )
+            .is_some()
         );
-        assert!(route.is_some());
-
-        let route = route_request(
-            "/npm/@scope%2fname",
-            None,
-            "http://localhost".to_owned(),
-            &upstreams,
+        assert!(
+            npm_tarball_url(
+                Some("u=https%3A%2F%2Fregistry.npmjs.org%2Fpkg%2F-%2Fpkg-1.0.0.tgz"),
+                &upstreams
+            )
+            .is_some()
         );
-        assert!(route.is_some());
-
-        let route = route_request(
-            "/pypi/files/pkg.whl",
-            Some("u=https%3A%2F%2Ffiles.pythonhosted.org%2Fpackages%2Fpkg.whl"),
-            "http://localhost".to_owned(),
-            &upstreams,
-        );
-        assert!(route.is_some());
     }
 
     #[test]
-    fn rewrites_pypi_html() {
+    fn rewrites_pypi_html_links() {
         let body =
             br#"<a href="https://files.pythonhosted.org/packages/pkg.whl#sha256=abc">pkg</a>"#;
         let upstreams = RegistryOrigins::default();
-        let route = route_request(
-            "/pypi/simple/pkg/",
-            None,
-            "http://localhost".to_owned(),
-            &upstreams,
-        )
-        .unwrap();
         let rewritten =
-            String::from_utf8(rewrite_metadata(&route, body, &upstreams).unwrap()).unwrap();
+            String::from_utf8(rewrite_pypi_html(body, &upstreams, "http://localhost").unwrap())
+                .unwrap();
         assert!(rewritten.contains("http://localhost/pypi/files/pkg.whl?u="));
         assert!(rewritten.contains("#sha256=abc"));
     }
@@ -348,8 +259,6 @@ mod tests {
     #[test]
     fn rewrites_npm_tarballs() {
         let upstreams = RegistryOrigins::default();
-        let route =
-            route_request("/npm/pkg", None, "http://localhost".to_owned(), &upstreams).unwrap();
         let body = serde_json::to_vec(&json!({
             "versions": {
                 "1.0.0": {
@@ -359,7 +268,7 @@ mod tests {
         }))
         .unwrap();
         let rewritten = serde_json::from_slice::<serde_json::Value>(
-            &rewrite_metadata(&route, &body, &upstreams).unwrap(),
+            &rewrite_npm_json(&body, &upstreams, "http://localhost").unwrap(),
         )
         .unwrap();
         assert_eq!(
@@ -369,6 +278,49 @@ mod tests {
                 .starts_with("http://localhost/npm/tarballs/pkg-1.0.0.tgz?u="),
             true
         );
+    }
+
+    #[test]
+    fn rewrites_root_npm_tarball() {
+        let upstreams = RegistryOrigins::default();
+        let body = serde_json::to_vec(&json!({
+            "name": "pkg",
+            "version": "1.0.0",
+            "dist": { "tarball": "https://registry.npmjs.org/pkg/-/pkg-1.0.0.tgz" }
+        }))
+        .unwrap();
+        let rewritten = serde_json::from_slice::<serde_json::Value>(
+            &rewrite_npm_json(&body, &upstreams, "http://localhost").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            rewritten["dist"]["tarball"]
+                .as_str()
+                .unwrap()
+                .starts_with("http://localhost/npm/tarballs/pkg-1.0.0.tgz?u="),
+            true
+        );
+    }
+
+    #[test]
+    fn rejects_absolute_npm_upstream_paths() {
+        let upstreams = RegistryOrigins::default();
+        assert!(npm_packument_url(&upstreams, "http://127.0.0.1:18080/").is_none());
+        assert!(npm_packument_url(&upstreams, "//127.0.0.1:18080/").is_none());
+    }
+
+    #[test]
+    fn rejects_absolute_cargo_index_paths() {
+        let upstreams = RegistryOrigins::default();
+        assert!(cargo_index_url(&upstreams, "http://127.0.0.1:18080/").is_none());
+        assert!(cargo_index_url(&upstreams, "//127.0.0.1:18080/").is_none());
+    }
+
+    #[test]
+    fn preserves_scoped_npm_package_encoding() {
+        let upstreams = RegistryOrigins::default();
+        let url = npm_packument_url(&upstreams, "@scope%2fname").unwrap();
+        assert_eq!(url.as_str(), "https://registry.npmjs.org/@scope%2fname");
     }
 
     #[test]

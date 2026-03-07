@@ -171,6 +171,45 @@ async fn revalidates_metadata() {
 }
 
 #[tokio::test]
+async fn routes_scoped_npm_packuments_without_decoding_scope_separator() {
+    let upstream = Upstream::new().await.unwrap();
+    upstream
+        .insert(
+            "/@scope%2Fname",
+            UpstreamResponse::json(
+                200,
+                json!({
+                    "name": "@scope/name",
+                    "dist": {
+                        "tarball": "https://registry.npmjs.org/@scope/name/-/name-1.0.0.tgz"
+                    }
+                }),
+            ),
+        )
+        .await;
+    let fixture = TestFixture::with_servers(upstream.clone()).await.unwrap();
+    let response = fixture
+        .client
+        .get(format!("{}/npm/@scope%2Fname", fixture.base_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body =
+        serde_json::from_slice::<serde_json::Value>(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(upstream.request_count("/@scope%2Fname").await, 1);
+    assert!(
+        body["dist"]["tarball"]
+            .as_str()
+            .unwrap()
+            .starts_with(&format!(
+                "{}/npm/tarballs/name-1.0.0.tgz?u=",
+                fixture.base_url
+            ))
+    );
+}
+
+#[tokio::test]
 async fn cold_metadata_requests_run_in_parallel() {
     let upstream = Upstream::new().await.unwrap();
     upstream

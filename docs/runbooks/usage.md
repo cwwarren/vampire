@@ -102,6 +102,7 @@ Notes:
 - `*.part` files are in-flight downloads and are cleaned on startup if stale.
 - Artifact misses are single-flight per cache key. Vampire waits for the full upstream artifact before replying, then serves the committed file.
 - Metadata cache fill is best-effort. Concurrent cold metadata requests can fetch upstream in parallel and race to populate cache.
+- Cached metadata is committed as one file, so readers do not see mixed metadata headers and body bytes during revalidation.
 - The cache bound is soft during a successful commit and enforced immediately after the write finishes.
 - Failure logs are JSON lines on stderr with `event=request_failed`, `event=artifact_fetch_failed`, or `event=startup_failed`.
 

@@ -1,5 +1,6 @@
 use crate::cache::{
-    ArtifactLeader, ArtifactLookup, CacheStore, InflightOutcome, StoredEntry, StoredResponseMeta,
+    ArtifactLeader, ArtifactLookup, CacheStore, InflightOutcome, StoredArtifact, StoredMetadata,
+    StoredResponseMeta,
 };
 use crate::config::Config;
 use crate::failure_log::log_failure;
@@ -171,8 +172,17 @@ impl App {
         upstream: reqwest::Url,
     ) -> io::Result<Response> {
         let key = CacheStore::key_for(cache_class, upstream.as_str(), "");
-        if let Some(entry) = self.cache.load(&key).await? {
-            return Ok(empty_response_from_meta(entry.meta));
+        match cache_class {
+            CacheClass::Artifact => {
+                if let Some(entry) = self.cache.load_artifact(&key).await? {
+                    return Ok(empty_response_from_meta(entry.meta));
+                }
+            }
+            CacheClass::Metadata => {
+                if let Some(entry) = self.cache.load_metadata(&key).await? {
+                    return Ok(empty_response_from_meta(entry.meta));
+                }
+            }
         }
         let response = self
             .client
@@ -190,13 +200,13 @@ impl App {
         rewrite: MetadataRewrite,
     ) -> io::Result<Response> {
         let key = CacheStore::key_for(CacheClass::Metadata, upstream.as_str(), "");
-        if let Some(entry) = self.cache.load(&key).await? {
+        if let Some(entry) = self.cache.load_metadata(&key).await? {
             if entry.meta.etag.is_some() || entry.meta.last_modified.is_some() {
                 return self
                     .revalidate_metadata(upstream, rewrite, key, entry)
                     .await;
             }
-            return file_response(entry).await;
+            return Ok(metadata_response(entry));
         }
         self.fetch_metadata(upstream, rewrite, key).await
     }
@@ -206,7 +216,7 @@ impl App {
         upstream: reqwest::Url,
         rewrite: MetadataRewrite,
         key: String,
-        entry: StoredEntry,
+        entry: StoredMetadata,
     ) -> io::Result<Response> {
         let mut request = self.client.get(upstream.clone());
         self.stats
@@ -219,7 +229,7 @@ impl App {
         }
         let response = request.send().await.map_err(io::Error::other)?;
         if response.status() == StatusCode::NOT_MODIFIED {
-            return file_response(entry).await;
+            return Ok(metadata_response(entry));
         }
         self.finish_metadata(rewrite, key, response).await
     }
@@ -267,7 +277,7 @@ impl App {
         );
         if status == StatusCode::OK && (meta.etag.is_some() || meta.last_modified.is_some()) {
             let entry = self.cache.store_metadata(&key, &rewritten, &meta).await?;
-            return file_response(entry).await;
+            return Ok(metadata_response(entry));
         }
         Ok(bytes_response(meta, Bytes::from(rewritten)))
     }
@@ -302,7 +312,7 @@ impl App {
     ) -> io::Result<Response> {
         match inflight.wait_for_outcome().await? {
             InflightOutcome::Cached => {
-                let entry = self.cache.load(key).await?.ok_or_else(|| {
+                let entry = self.cache.load_artifact(key).await?.ok_or_else(|| {
                     io::Error::new(
                         io::ErrorKind::NotFound,
                         "artifact missing after inflight completion",
@@ -593,12 +603,14 @@ async fn pypi_file_head(State(app): State<App>, OriginalUri(uri): OriginalUri) -
 
 async fn npm_packument_get(
     State(app): State<App>,
-    Path(package): Path<String>,
     OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
 ) -> Response {
     let origin = request_origin(&headers);
-    let Some(upstream) = npm_packument_url(&app.upstreams, &package) else {
+    let Some(package) = raw_path_tail(&uri, "/npm/") else {
+        return not_found().await;
+    };
+    let Some(upstream) = npm_packument_url(&app.upstreams, package) else {
         return not_found().await;
     };
     app.handle_metadata(upstream, MetadataRewrite::Npm(origin))
@@ -606,12 +618,11 @@ async fn npm_packument_get(
         .unwrap_or_else(|error| request_failed_response("GET", &uri, error))
 }
 
-async fn npm_packument_head(
-    State(app): State<App>,
-    Path(package): Path<String>,
-    OriginalUri(uri): OriginalUri,
-) -> Response {
-    let Some(upstream) = npm_packument_url(&app.upstreams, &package) else {
+async fn npm_packument_head(State(app): State<App>, OriginalUri(uri): OriginalUri) -> Response {
+    let Some(package) = raw_path_tail(&uri, "/npm/") else {
+        return not_found().await;
+    };
+    let Some(upstream) = npm_packument_url(&app.upstreams, package) else {
         return not_found().await;
     };
     app.handle_head(CacheClass::Metadata, upstream)
@@ -733,12 +744,16 @@ fn meta_for_bytes(
     meta
 }
 
-async fn file_response(entry: StoredEntry) -> io::Result<Response> {
+async fn file_response(entry: StoredArtifact) -> io::Result<Response> {
     let file = fs::File::open(entry.body_path).await?;
     let mut response = Response::new(Body::from_stream(ReaderStream::new(file)));
     *response.status_mut() = StatusCode::from_u16(entry.meta.status).unwrap_or(StatusCode::OK);
     apply_headers(response.headers_mut(), &entry.meta.headers);
     Ok(response)
+}
+
+fn metadata_response(entry: StoredMetadata) -> Response {
+    bytes_response(entry.meta, entry.body)
 }
 
 fn bytes_response(meta: StoredResponseMeta, body: Bytes) -> Response {
@@ -765,6 +780,14 @@ fn apply_headers(headers: &mut HeaderMap, pairs: &[(String, String)]) {
         };
         headers.insert(name, value);
     }
+}
+
+fn raw_path_tail<'a>(uri: &'a Uri, prefix: &str) -> Option<&'a str> {
+    let tail = uri.path().strip_prefix(prefix)?;
+    if tail.is_empty() {
+        return None;
+    }
+    Some(tail)
 }
 
 fn is_hop_header(name: &str) -> bool {

@@ -188,7 +188,10 @@ fn upstream_from_query(query: &str, base: &Url) -> Option<Url> {
 }
 
 fn join_url(base: &Url, path: &str) -> Option<Url> {
-    let url = base.join(path).ok()?;
+    if path.starts_with('/') || path.starts_with("//") || Url::parse(path).is_ok() {
+        return None;
+    }
+    let url = Url::parse(&format!("{}{path}", base.as_str())).ok()?;
     matches_origin(&url, base).then_some(url)
 }
 
@@ -311,6 +314,13 @@ mod tests {
         let upstreams = RegistryOrigins::default();
         assert!(cargo_index_url(&upstreams, "http://127.0.0.1:18080/").is_none());
         assert!(cargo_index_url(&upstreams, "//127.0.0.1:18080/").is_none());
+    }
+
+    #[test]
+    fn preserves_scoped_npm_package_encoding() {
+        let upstreams = RegistryOrigins::default();
+        let url = npm_packument_url(&upstreams, "@scope%2fname").unwrap();
+        assert_eq!(url.as_str(), "https://registry.npmjs.org/@scope%2fname");
     }
 
     #[test]

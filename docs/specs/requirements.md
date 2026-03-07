@@ -42,6 +42,7 @@
 - Followers wait for the same completed result and then serve the committed file or the completed upstream error response.
 - Metadata is cached only when upstream returns `ETag` or `Last-Modified`.
 - Metadata fetches are not deduped. Concurrent cold metadata requests may fetch upstream independently and race to populate cache.
+- Cached metadata is published as a single atomic file so readers never observe mixed headers and body bytes.
 - Eviction is oldest-first by completed file mtime.
 - Successful writes may overshoot temporarily; janitor eviction restores the bound after commit.
 

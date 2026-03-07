@@ -125,15 +125,13 @@ impl CacheStore {
         if let Some(entry) = self.load(&key).await? {
             return Ok(ArtifactLookup::Hit(entry));
         }
-        {
-            let inflight = self.inflight.lock().await;
-            if let Some(existing) = inflight.get(&key) {
-                return Ok(ArtifactLookup::Join(existing.clone()));
-            }
-        }
         let paths = self.paths_for(&key);
         if let Some(parent) = paths.body.parent() {
             fs::create_dir_all(parent).await?;
+        }
+        let mut inflight_map = self.inflight.lock().await;
+        if let Some(existing) = inflight_map.get(&key) {
+            return Ok(ArtifactLookup::Join(existing.clone()));
         }
         let lock_file = std::fs::OpenOptions::new()
             .create(true)
@@ -142,16 +140,10 @@ impl CacheStore {
             .write(true)
             .open(&paths.lock)?;
         if let Err(error) = lock_file.try_lock_exclusive() {
-            if let Some(existing) = self.inflight.lock().await.get(&key).cloned() {
-                return Ok(ArtifactLookup::Join(existing));
-            }
             return Err(io::Error::new(io::ErrorKind::WouldBlock, error));
         }
         let inflight = Arc::new(Inflight::new(paths.temp.clone()));
-        self.inflight
-            .lock()
-            .await
-            .insert(key.clone(), inflight.clone());
+        inflight_map.insert(key.clone(), inflight.clone());
         Ok(ArtifactLookup::Leader(ArtifactLeader {
             inflight,
             key,

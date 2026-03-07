@@ -1,3 +1,4 @@
+use futures_util::future::join_all;
 use http::StatusCode;
 use hyper::body::Incoming;
 use hyper::service::service_fn;
@@ -69,27 +70,18 @@ async fn caches_artifacts_and_dedupes_misses() {
         "{}/cargo/api/v1/crates/demo/1.0.0/download",
         fixture.base_url
     );
-    let first = fixture.client.get(&url).send();
-    let second = fixture.client.get(&url).send();
-    let (first, second) = tokio::join!(first, second);
-    let first = first.unwrap();
-    let second = second.unwrap();
-    let first_status = first.status();
-    let second_status = second.status();
-    let first_body = first.bytes().await.unwrap();
-    let second_body = second.bytes().await.unwrap();
-    assert_eq!(
-        first_body.len(),
-        128 * 1024,
-        "first status={first_status} body={}",
-        String::from_utf8_lossy(&first_body)
-    );
-    assert_eq!(
-        second_body.len(),
-        128 * 1024,
-        "second status={second_status} body={}",
-        String::from_utf8_lossy(&second_body)
-    );
+    let responses = join_all((0..16).map(|_| fixture.client.get(&url).send())).await;
+    for (index, response) in responses.into_iter().enumerate() {
+        let response = response.unwrap();
+        let status = response.status();
+        let body = response.bytes().await.unwrap();
+        assert_eq!(
+            body.len(),
+            128 * 1024,
+            "response {index} status={status} body={}",
+            String::from_utf8_lossy(&body)
+        );
+    }
     assert_eq!(
         upstream
             .request_count("/crates/demo/demo-1.0.0.crate")

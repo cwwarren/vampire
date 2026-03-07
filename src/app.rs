@@ -525,6 +525,13 @@ async fn inflight_response(
     inflight: Arc<crate::cache::Inflight>,
 ) -> io::Result<Response<ResponseBody>> {
     let meta = inflight.wait_for_headers().await?;
+    loop {
+        let snapshot = inflight.snapshot().await;
+        if snapshot.bytes_written > 0 || snapshot.complete {
+            break;
+        }
+        inflight.wait().await;
+    }
     let reader_guard = inflight.reader_guard().await;
     let path = inflight.temp_path().to_path_buf();
     let stream = async_stream::try_stream! {
@@ -656,4 +663,56 @@ fn empty_body() -> ResponseBody {
 
 fn never_to_io(never: Infallible) -> io::Error {
     match never {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{StoredResponseMeta, inflight_response};
+    use crate::cache::Inflight;
+    use crate::routes::CacheClass;
+    use bytes::Bytes;
+    use http_body_util::BodyExt;
+    use std::io;
+    use std::sync::Arc;
+    use tempfile::tempdir;
+    use tokio::fs;
+    use tokio::time::{Duration, timeout};
+
+    #[tokio::test]
+    async fn inflight_response_waits_for_first_bytes() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("artifact.part");
+        fs::File::create(&path).await.unwrap();
+        let inflight = Arc::new(Inflight::new(path.clone()));
+        let mut response = Box::pin(inflight_response(inflight.clone()));
+        inflight
+            .set_headers(StoredResponseMeta {
+                cache_class: CacheClass::Artifact,
+                headers: vec![],
+                last_modified: None,
+                etag: None,
+                status: 200,
+            })
+            .await;
+        assert!(
+            timeout(Duration::from_millis(50), response.as_mut())
+                .await
+                .is_err()
+        );
+        fs::write(&path, b"abc").await.unwrap();
+        inflight.advance(3).await;
+        inflight.finish().await;
+        let response = timeout(Duration::from_secs(1), response.as_mut())
+            .await
+            .unwrap()
+            .unwrap();
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .map_err(io::Error::other)
+            .unwrap()
+            .to_bytes();
+        assert_eq!(body, Bytes::from_static(b"abc"));
+    }
 }

@@ -310,7 +310,7 @@ impl CacheStore {
 }
 
 impl Inflight {
-    fn new(temp_path: PathBuf) -> Self {
+    pub(crate) fn new(temp_path: PathBuf) -> Self {
         Self {
             temp_path,
             state: Mutex::new(InflightState {

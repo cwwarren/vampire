@@ -89,7 +89,7 @@ EOF
 
 Vampire exposes only the registry-specific paths it needs for PyPI, npm, and Cargo, including PyPI simple pages and file downloads, npm package metadata and tarballs, and Cargo sparse index and crate download endpoints. The proxy keeps artifact downloads on its own URLs by rewriting PyPI and npm metadata before returning it to clients.
 
-On a cache hit, vampire serves the artifact directly from disk. On a miss, one request fetches the artifact from upstream, commits it to the cache, and then serves it; any concurrent followers wait for that completed result instead of triggering another fetch. Only completed artifacts are ever served to clients. Metadata is cached more conservatively and only when the upstream response includes validators such as `ETag` or `Last-Modified`.
+On a cache hit, vampire serves the artifact directly from disk. On a miss, one request fetches the artifact from upstream, commits it to the cache, and then serves it; any concurrent followers wait for that completed result instead of triggering another fetch. Only completed artifacts are ever served to clients. Metadata is cached more conservatively and only when the upstream response includes validators such as `ETag` or `Last-Modified`, and concurrent cold metadata requests are allowed to race and populate cache on a best-effort basis.
 
 ## More
 

@@ -1,13 +1,13 @@
 use crate::config::Config;
 use crate::routes::CacheClass;
 use bytes::Bytes;
-use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 use tokio::fs;
 use tokio::sync::{Mutex, Notify, OwnedSemaphorePermit, Semaphore};
@@ -17,7 +17,8 @@ pub struct CacheStore {
     root: Arc<PathBuf>,
     max_cache_size: u64,
     inflight: Arc<Mutex<HashMap<String, Arc<Inflight>>>>,
-    metadata_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    metadata_commit_locks: Arc<Vec<Arc<Mutex<()>>>>,
+    temp_counter: Arc<AtomicU64>,
     upstream_semaphore: Arc<Semaphore>,
 }
 
@@ -40,7 +41,6 @@ pub struct ArtifactLeader {
     pub inflight: Arc<Inflight>,
     pub key: String,
     pub paths: CachePaths,
-    pub lock_file: std::fs::File,
 }
 
 pub enum ArtifactLookup {
@@ -53,7 +53,6 @@ pub struct CachePaths {
     pub body: PathBuf,
     pub meta: PathBuf,
     pub temp: PathBuf,
-    pub lock: PathBuf,
 }
 
 pub struct Inflight {
@@ -78,7 +77,8 @@ impl CacheStore {
             root: Arc::new(config.cache_dir.clone()),
             max_cache_size: config.max_cache_size,
             inflight: Arc::new(Mutex::new(HashMap::new())),
-            metadata_locks: Arc::new(Mutex::new(HashMap::new())),
+            metadata_commit_locks: Arc::new((0..16).map(|_| Arc::new(Mutex::new(()))).collect()),
+            temp_counter: Arc::new(AtomicU64::new(0)),
             upstream_semaphore: Arc::new(Semaphore::new(config.max_upstream_fetches)),
         };
         store.cleanup_stale_temps(Duration::from_secs(300)).await?;
@@ -130,22 +130,12 @@ impl CacheStore {
         if let Some(existing) = inflight_map.get(&key) {
             return Ok(ArtifactLookup::Join(existing.clone()));
         }
-        let lock_file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(&paths.lock)?;
-        if let Err(error) = lock_file.try_lock_exclusive() {
-            return Err(io::Error::new(io::ErrorKind::WouldBlock, error));
-        }
         let inflight = Arc::new(Inflight::new());
         inflight_map.insert(key.clone(), inflight.clone());
         Ok(ArtifactLookup::Leader(ArtifactLeader {
             inflight,
             key,
             paths,
-            lock_file,
         }))
     }
 
@@ -159,11 +149,15 @@ impl CacheStore {
         if let Some(parent) = paths.body.parent() {
             fs::create_dir_all(parent).await?;
         }
-        fs::write(&paths.temp, body).await?;
-        fs::rename(&paths.temp, &paths.body).await?;
+        let temp_body = self.unique_temp_path(&paths.temp);
+        let temp_meta = self.unique_temp_path(&paths.meta);
+        fs::write(&temp_body, body).await?;
         let meta_bytes = serde_json::to_vec(meta)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        fs::write(&paths.meta, meta_bytes).await?;
+        fs::write(&temp_meta, meta_bytes).await?;
+        let _guard = self.lock_metadata_commit(key).await;
+        fs::rename(&temp_body, &paths.body).await?;
+        fs::rename(&temp_meta, &paths.meta).await?;
         self.evict_to_bound().await?;
         Ok(StoredEntry {
             body_path: paths.body,
@@ -197,17 +191,6 @@ impl CacheStore {
             .map_err(|error| io::Error::new(io::ErrorKind::BrokenPipe, error.to_string()))
     }
 
-    pub async fn lock_metadata(&self, key: &str) -> tokio::sync::OwnedMutexGuard<()> {
-        let lock = {
-            let mut locks = self.metadata_locks.lock().await;
-            locks
-                .entry(key.to_owned())
-                .or_insert_with(|| Arc::new(Mutex::new(())))
-                .clone()
-        };
-        lock.lock_owned().await
-    }
-
     pub async fn finish_inflight(&self, key: &str) {
         self.inflight.lock().await.remove(key);
     }
@@ -219,8 +202,24 @@ impl CacheStore {
             body: dir.join(format!("{key}.body")),
             meta: dir.join(format!("{key}.json")),
             temp: dir.join(format!("{key}.part")),
-            lock: dir.join(format!("{key}.lock")),
         }
+    }
+
+    fn unique_temp_path(&self, path: &Path) -> PathBuf {
+        let suffix = self.temp_counter.fetch_add(1, Ordering::Relaxed);
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("temp");
+        path.with_file_name(format!("{name}.{suffix}.part"))
+    }
+
+    async fn lock_metadata_commit(&self, key: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        let Some(first_byte) = key.as_bytes().first() else {
+            return self.metadata_commit_locks[0].clone().lock_owned().await;
+        };
+        let index = (*first_byte as usize) % self.metadata_commit_locks.len();
+        self.metadata_commit_locks[index].clone().lock_owned().await
     }
 
     async fn cleanup_stale_temps(&self, max_age: Duration) -> io::Result<()> {

@@ -37,9 +37,11 @@
 
 ## Cache Rules
 - Artifacts are cached by canonical upstream URL until evicted.
+- Cache coordination is in-process only. Sharing one cache directory across multiple vampire processes is unsupported.
 - On an artifact miss, vampire completes the upstream artifact fetch before it begins the client response.
 - Followers wait for the same completed result and then serve the committed file or the completed upstream error response.
 - Metadata is cached only when upstream returns `ETag` or `Last-Modified`.
+- Metadata fetches are not deduped. Concurrent cold metadata requests may fetch upstream independently and race to populate cache.
 - Eviction is oldest-first by completed file mtime.
 - Successful writes may overshoot temporarily; janitor eviction restores the bound after commit.
 

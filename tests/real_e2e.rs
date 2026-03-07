@@ -222,6 +222,7 @@ async fn run_npm_install(base_url: &str, root: &Path, label: &str) -> io::Result
             ("NPM_CONFIG_FUND", "false".to_owned()),
             ("NPM_CONFIG_MAXSOCKETS", "8".to_owned()),
             ("NPM_CONFIG_PROGRESS", "false".to_owned()),
+            ("NPM_CONFIG_UPDATE_NOTIFIER", "false".to_owned()),
         ],
     )
     .await?;

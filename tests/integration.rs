@@ -1,5 +1,7 @@
 use futures_util::future::join_all;
 use http::StatusCode;
+use http_body_util::{BodyExt, Full, StreamBody, combinators::UnsyncBoxBody};
+use hyper::body::Frame;
 use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper::{Request, Response};
@@ -17,8 +19,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use tempfile::TempDir;
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
+use tokio::time::{Duration, Instant};
 use vampire::routes::RegistryOrigins;
 use vampire::{App, Config};
+
+type TestBody = UnsyncBoxBody<bytes::Bytes, io::Error>;
 
 #[tokio::test]
 async fn rejects_unknown_routes() {
@@ -93,6 +98,43 @@ async fn caches_artifacts_and_dedupes_misses() {
     assert_eq!(
         upstream
             .request_count("/crates/demo/demo-1.0.0.crate")
+            .await,
+        1
+    );
+}
+
+#[tokio::test]
+async fn cold_artifact_waits_for_complete_fetch() {
+    let upstream = Upstream::new().await.unwrap();
+    upstream
+        .insert(
+            "/crates/slow/slow-1.0.0.crate",
+            UpstreamResponse::slow_bytes(
+                200,
+                "application/octet-stream",
+                vec![b'a'; 64 * 1024],
+                vec![b'b'; 64 * 1024],
+                Duration::from_millis(250),
+            ),
+        )
+        .await;
+    let fixture = TestFixture::with_servers(upstream.clone()).await.unwrap();
+    let url = format!(
+        "{}/cargo/api/v1/crates/slow/1.0.0/download",
+        fixture.base_url
+    );
+    let start = Instant::now();
+    let response = fixture.client.get(&url).send().await.unwrap();
+    assert!(
+        start.elapsed() >= Duration::from_millis(200),
+        "artifact response started before upstream fetch completed: {:?}",
+        start.elapsed()
+    );
+    let body = response.bytes().await.unwrap();
+    assert_eq!(body.len(), 128 * 1024);
+    assert_eq!(
+        upstream
+            .request_count("/crates/slow/slow-1.0.0.crate")
             .await,
         1
     );
@@ -256,10 +298,7 @@ impl Upstream {
             .unwrap_or(0)
     }
 
-    async fn handle(
-        &self,
-        request: Request<Incoming>,
-    ) -> Response<http_body_util::Full<bytes::Bytes>> {
+    async fn handle(&self, request: Request<Incoming>) -> Response<TestBody> {
         let path = request.uri().path().to_owned();
         if let Some(counter) = self.counts.lock().await.get(&path).cloned() {
             counter.fetch_add(1, Ordering::SeqCst);
@@ -268,9 +307,11 @@ impl Upstream {
         let Some(queue) = routes.get_mut(&path) else {
             return Response::builder()
                 .status(404)
-                .body(http_body_util::Full::new(bytes::Bytes::from_static(
-                    b"missing",
-                )))
+                .body(
+                    Full::new(bytes::Bytes::from_static(b"missing"))
+                        .map_err(never)
+                        .boxed_unsync(),
+                )
                 .unwrap();
         };
         let mut response = queue
@@ -297,8 +338,18 @@ impl Upstream {
 struct UpstreamResponse {
     status: u16,
     headers: Vec<(String, String)>,
-    body: Vec<u8>,
+    body: UpstreamBody,
     if_none_match: Option<String>,
+}
+
+#[derive(Clone)]
+enum UpstreamBody {
+    Full(Vec<u8>),
+    Slow {
+        first: Vec<u8>,
+        second: Vec<u8>,
+        pause: Duration,
+    },
 }
 
 impl UpstreamResponse {
@@ -309,7 +360,7 @@ impl UpstreamResponse {
                 ("content-type".to_owned(), content_type.to_owned()),
                 ("content-length".to_owned(), body.len().to_string()),
             ],
-            body,
+            body: UpstreamBody::Full(body),
             if_none_match: None,
         }
     }
@@ -330,7 +381,32 @@ impl UpstreamResponse {
         Self {
             status,
             headers: vec![],
-            body: Vec::new(),
+            body: UpstreamBody::Full(Vec::new()),
+            if_none_match: None,
+        }
+    }
+
+    fn slow_bytes(
+        status: u16,
+        content_type: &str,
+        first: Vec<u8>,
+        second: Vec<u8>,
+        pause: Duration,
+    ) -> Self {
+        Self {
+            status,
+            headers: vec![
+                ("content-type".to_owned(), content_type.to_owned()),
+                (
+                    "content-length".to_owned(),
+                    (first.len() + second.len()).to_string(),
+                ),
+            ],
+            body: UpstreamBody::Slow {
+                first,
+                second,
+                pause,
+            },
             if_none_match: None,
         }
     }
@@ -345,7 +421,7 @@ impl UpstreamResponse {
         self
     }
 
-    fn into_response(self) -> Response<http_body_util::Full<bytes::Bytes>> {
+    fn into_response(self) -> Response<TestBody> {
         let mut response = Response::builder().status(self.status);
         let headers = response.headers_mut().unwrap();
         for (name, value) in self.headers {
@@ -354,12 +430,36 @@ impl UpstreamResponse {
                 http::header::HeaderValue::from_str(&value).unwrap(),
             );
         }
-        response
-            .body(http_body_util::Full::new(bytes::Bytes::from(self.body)))
-            .unwrap()
+        match self.body {
+            UpstreamBody::Full(body) => response
+                .body(
+                    Full::new(bytes::Bytes::from(body))
+                        .map_err(never)
+                        .boxed_unsync(),
+                )
+                .unwrap(),
+            UpstreamBody::Slow {
+                first,
+                second,
+                pause,
+            } => {
+                let stream = async_stream::try_stream! {
+                    yield Frame::data(bytes::Bytes::from(first));
+                    tokio::time::sleep(pause).await;
+                    yield Frame::data(bytes::Bytes::from(second));
+                };
+                response
+                    .body(StreamBody::new(stream).boxed_unsync())
+                    .unwrap()
+            }
+        }
     }
 }
 
 async fn listen_addr() -> io::Result<SocketAddr> {
     Ok(TcpListener::bind("127.0.0.1:0").await?.local_addr()?)
+}
+
+fn never(never: std::convert::Infallible) -> io::Error {
+    match never {}
 }

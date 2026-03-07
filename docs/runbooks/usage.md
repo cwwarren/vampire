@@ -40,6 +40,7 @@ registry = "sparse+http://127.0.0.1:8080/cargo/index/"
 ## Operational Notes
 - One vampire process should own a cache directory.
 - `*.part` files are in-flight downloads and are cleaned on startup if stale.
+- Artifact misses are single-flight per cache key. Vampire waits for the full upstream artifact before replying, then serves the committed file.
 - The cache bound is soft during a successful commit and enforced immediately after the write finishes.
 - Failure logs are JSON lines on stderr with `event=request_failed`, `event=artifact_fetch_failed`, or `event=startup_failed`.
 
@@ -54,5 +55,4 @@ cargo test --test real_e2e -- --ignored --test-threads=1 --nocapture
 - Do not combine `self-hosted` with the ARC scale-set name in `runs-on`.
 - `pull_request` runs `cargo test` and the live suite in parallel for PR validation.
 - `push` runs only on `main`, so PR branches do not get an extra duplicate push workflow.
-- `push` to `main` runs the same two jobs and then uploads `target/release/vampire` as a workflow artifact.
 - `push` to `main` also publishes `ghcr.io/<owner>/vampire` with `latest` and `sha-<full git sha>` tags from the ARC runner.

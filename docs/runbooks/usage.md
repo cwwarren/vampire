@@ -36,6 +36,7 @@ cargo test --test real_e2e -- --ignored --test-threads=1 --nocapture
 ```
 
 ## CI
-- GitHub Actions runs on the self-hosted runner label `procyon-vampire`.
+- GitHub Actions runs on the ARC scale-set label `procyon-vampire`.
+- Do not combine `self-hosted` with the ARC scale-set name in `runs-on`.
 - `pull_request` runs `cargo test` and the live suite in parallel.
 - `push` to `main` runs the same two jobs and then uploads `target/release/vampire` as a workflow artifact.

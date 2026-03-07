@@ -9,9 +9,7 @@ on:
 
 jobs:
   test:
-    runs-on:
-      - self-hosted
-      - procyon-vampire
+    runs-on: procyon-vampire
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -19,9 +17,7 @@ jobs:
         run: cargo test
 
   real-e2e:
-    runs-on:
-      - self-hosted
-      - procyon-vampire
+    runs-on: procyon-vampire
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -33,9 +29,7 @@ jobs:
     needs:
       - test
       - real-e2e
-    runs-on:
-      - self-hosted
-      - procyon-vampire
+    runs-on: procyon-vampire
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

@@ -37,6 +37,66 @@ replace-with = "vampire"
 registry = "sparse+http://127.0.0.1:8080/cargo/index/"
 ```
 
+## Sandbox Overrides
+For agent sandboxes, prefer environment variables over persistent dotfiles.
+
+Python with `pip`:
+```bash
+export VAMPIRE=http://127.0.0.1:8080
+export PIP_CONFIG_FILE=/dev/null
+export PIP_INDEX_URL="$VAMPIRE/pypi/simple/"
+export PIP_TRUSTED_HOST=127.0.0.1
+```
+
+Python with `uv`:
+```bash
+export VAMPIRE=http://127.0.0.1:8080
+export UV_NO_CONFIG=1
+export UV_DEFAULT_INDEX="$VAMPIRE/pypi/simple/"
+export UV_INSECURE_HOST=127.0.0.1
+```
+
+Node with `npm`:
+```bash
+export VAMPIRE=http://127.0.0.1:8080
+export NPM_CONFIG_USERCONFIG=/dev/null
+export NPM_CONFIG_GLOBALCONFIG=/dev/null
+export NPM_CONFIG_REGISTRY="$VAMPIRE/npm/"
+export NPM_CONFIG_AUDIT=false
+export NPM_CONFIG_FUND=false
+export NPM_CONFIG_UPDATE_NOTIFIER=false
+```
+
+Node with `bun`:
+```bash
+export VAMPIRE=http://127.0.0.1:8080
+export BUN_CONFIG_REGISTRY="$VAMPIRE/npm/"
+```
+
+Rust with `cargo`:
+- Use `CARGO_HOME` to isolate cache and config from the host.
+- There is no documented single env var that replaces crates.io for dependency resolution end-to-end.
+- Generate a temporary `config.toml` for source replacement:
+
+```bash
+export VAMPIRE=http://127.0.0.1:8080
+export CARGO_HOME="${TMPDIR:-/tmp}/vampire-cargo"
+mkdir -p "$CARGO_HOME"
+cat >"$CARGO_HOME/config.toml" <<EOF
+[source.crates-io]
+replace-with = "vampire"
+
+[source.vampire]
+registry = "sparse+$VAMPIRE/cargo/index/"
+EOF
+```
+
+Notes:
+- `pip` and `uv` need the `simple/` endpoint.
+- `npm` and `bun` need the `/npm/` endpoint.
+- If you run vampire over HTTPS with a trusted certificate, drop `PIP_TRUSTED_HOST` and `UV_INSECURE_HOST`.
+- `npm` has other useful env-only toggles for sandboxes because every documented config key can be set through `NPM_CONFIG_*`.
+
 ## Operational Notes
 - One vampire process should own a cache directory.
 - `*.part` files are in-flight downloads and are cleaned on startup if stale.

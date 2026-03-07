@@ -1,0 +1,49 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - feat/ci
+
+jobs:
+  test:
+    runs-on:
+      - self-hosted
+      - procyon-vampire
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run standard test suite
+        run: cargo test
+
+  real-e2e:
+    runs-on:
+      - self-hosted
+      - procyon-vampire
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run live end-to-end suite
+        run: cargo test --test real_e2e -- --ignored --test-threads=1 --nocapture
+
+  release:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs:
+      - test
+      - real-e2e
+    runs-on:
+      - self-hosted
+      - procyon-vampire
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build release binary
+        run: cargo build --release
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vampire-release-${{ github.sha }}
+          path: target/release/vampire
+          if-no-files-found: error

@@ -42,6 +42,52 @@ enum MetadataRewrite {
     Pypi(String),
 }
 
+struct ArtifactFetchCleanup {
+    cache: CacheStore,
+    inflight: Arc<crate::cache::Inflight>,
+    key: String,
+    temp_path: std::path::PathBuf,
+    armed: bool,
+}
+
+impl ArtifactFetchCleanup {
+    fn new(
+        cache: CacheStore,
+        inflight: Arc<crate::cache::Inflight>,
+        key: String,
+        temp_path: std::path::PathBuf,
+    ) -> Self {
+        Self {
+            cache,
+            inflight,
+            key,
+            temp_path,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ArtifactFetchCleanup {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let cache = self.cache.clone();
+        let inflight = self.inflight.clone();
+        let key = self.key.clone();
+        let temp_path = self.temp_path.clone();
+        tokio::spawn(async move {
+            let _ = fs::remove_file(&temp_path).await;
+            inflight.fail("artifact fetch cancelled".to_owned()).await;
+            cache.finish_inflight(&key).await;
+        });
+    }
+}
+
 impl App {
     pub async fn new(config: Config) -> io::Result<Self> {
         let client = Client::builder()
@@ -234,8 +280,19 @@ impl App {
                 self.stats.record_artifact_join(upstream.as_str());
                 self.serve_inflight(&key, inflight).await
             }
-            ArtifactLookup::Leader(leader) => self.fetch_artifact(upstream, leader).await,
+            ArtifactLookup::Leader(leader) => {
+                let inflight = leader.inflight.clone();
+                self.spawn_artifact_fetch(upstream, leader);
+                self.serve_inflight(&key, inflight).await
+            }
         }
+    }
+
+    fn spawn_artifact_fetch(&self, upstream: reqwest::Url, leader: ArtifactLeader) {
+        let app = self.clone();
+        tokio::spawn(async move {
+            app.run_artifact_fetch(upstream, leader).await;
+        });
     }
 
     async fn serve_inflight(
@@ -257,11 +314,7 @@ impl App {
         }
     }
 
-    async fn fetch_artifact(
-        &self,
-        upstream: reqwest::Url,
-        leader: ArtifactLeader,
-    ) -> io::Result<Response> {
+    async fn run_artifact_fetch(&self, upstream: reqwest::Url, leader: ArtifactLeader) {
         let upstream_string = upstream.as_str().to_owned();
         let fail = |stage: &str, error: &str| {
             log_failure(
@@ -274,13 +327,20 @@ impl App {
                 }),
             );
         };
+        let mut cleanup = ArtifactFetchCleanup::new(
+            self.cache.clone(),
+            leader.inflight.clone(),
+            leader.key.clone(),
+            leader.paths.temp.clone(),
+        );
         let _permit = match self.cache.acquire_upstream_permit().await {
             Ok(permit) => permit,
             Err(error) => {
                 fail("acquire_upstream_permit", &error.to_string());
                 leader.inflight.fail(error.to_string()).await;
                 self.cache.finish_inflight(&leader.key).await;
-                return Err(error);
+                cleanup.disarm();
+                return;
             }
         };
         self.stats
@@ -292,7 +352,8 @@ impl App {
                 fail("fetch_upstream", &error.to_string());
                 leader.inflight.fail(error.to_string()).await;
                 self.cache.finish_inflight(&leader.key).await;
-                return Err(error);
+                cleanup.disarm();
+                return;
             }
         };
         let status = response.status();
@@ -305,7 +366,8 @@ impl App {
                     fail("read_error_response", &error.to_string());
                     leader.inflight.fail(error.to_string()).await;
                     self.cache.finish_inflight(&leader.key).await;
-                    return Err(error);
+                    cleanup.disarm();
+                    return;
                 }
             };
             let meta = meta_for_bytes(CacheClass::Artifact, status, &headers, body.len());
@@ -314,14 +376,16 @@ impl App {
                 .finish_response(meta.clone(), body.clone())
                 .await;
             self.cache.finish_inflight(&leader.key).await;
-            return Ok(bytes_response(meta, body));
+            cleanup.disarm();
+            return;
         }
         if let Some(parent) = leader.paths.temp.parent() {
             if let Err(error) = fs::create_dir_all(parent).await {
                 fail("create_temp_dir", &error.to_string());
                 leader.inflight.fail(error.to_string()).await;
                 self.cache.finish_inflight(&leader.key).await;
-                return Err(error);
+                cleanup.disarm();
+                return;
             }
         }
         let mut file = match fs::File::create(&leader.paths.temp).await {
@@ -330,7 +394,8 @@ impl App {
                 fail("create_temp_file", &error.to_string());
                 leader.inflight.fail(error.to_string()).await;
                 self.cache.finish_inflight(&leader.key).await;
-                return Err(error);
+                cleanup.disarm();
+                return;
             }
         };
         let mut response = response;
@@ -344,7 +409,8 @@ impl App {
                     fail("read_upstream_stream", &error.to_string());
                     leader.inflight.fail(error.to_string()).await;
                     self.cache.finish_inflight(&leader.key).await;
-                    return Err(error);
+                    cleanup.disarm();
+                    return;
                 }
             };
             let Some(chunk) = chunk else {
@@ -355,7 +421,8 @@ impl App {
                 fail("write_temp_file", &error.to_string());
                 leader.inflight.fail(error.to_string()).await;
                 self.cache.finish_inflight(&leader.key).await;
-                return Err(error);
+                cleanup.disarm();
+                return;
             }
             content_length += chunk.len();
         }
@@ -365,7 +432,8 @@ impl App {
             fail("flush_temp_file", &error.to_string());
             leader.inflight.fail(error.to_string()).await;
             self.cache.finish_inflight(&leader.key).await;
-            return Err(error);
+            cleanup.disarm();
+            return;
         }
         drop(file);
         let meta = meta_from_upstream(CacheClass::Artifact, status, &headers, content_length);
@@ -380,12 +448,14 @@ impl App {
                 fail("commit_cache_entry", &error.to_string());
                 leader.inflight.fail(error.to_string()).await;
                 self.cache.finish_inflight(&leader.key).await;
-                return Err(error);
+                cleanup.disarm();
+                return;
             }
         };
         leader.inflight.finish_cached().await;
         self.cache.finish_inflight(&leader.key).await;
-        file_response(entry).await
+        cleanup.disarm();
+        let _ = entry;
     }
 }
 
@@ -744,4 +814,118 @@ fn empty_response(status: StatusCode) -> Response {
     let mut response = Response::new(Body::empty());
     *response.status_mut() = status;
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{App, ArtifactLookup, InflightOutcome};
+    use crate::config::Config;
+    use crate::routes::RegistryOrigins;
+    use axum::Router;
+    use axum::body::Body;
+    use axum::http::StatusCode;
+    use axum::routing::get;
+    use bytes::Bytes;
+    use reqwest::Client;
+    use std::io;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use tempfile::tempdir;
+    use tokio::net::TcpListener;
+    use tokio::sync::Notify;
+    use tokio::time::{Duration, timeout};
+
+    #[tokio::test]
+    async fn aborted_artifact_fetch_cleans_up_inflight() {
+        let started = Arc::new(Notify::new());
+        let upstream = slow_upstream(started.clone()).await.unwrap();
+        let temp = tempdir().unwrap();
+        let config = Config {
+            bind: "127.0.0.1:0".parse().unwrap(),
+            cache_dir: PathBuf::from(temp.path()),
+            max_cache_size: 16 * 1024 * 1024,
+            max_upstream_fetches: 4,
+            upstream_timeout: Duration::from_secs(30),
+        };
+        let client = Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .unwrap();
+        let app = App::new_with_upstreams(config, client, RegistryOrigins::default())
+            .await
+            .unwrap();
+        let upstream_url = reqwest::Url::parse(&format!("http://{}/artifact", upstream)).unwrap();
+        let key = crate::cache::CacheStore::key_for(
+            crate::routes::CacheClass::Artifact,
+            upstream_url.as_str(),
+            "",
+        );
+        let leader = match app
+            .cache
+            .lookup_or_start_artifact(key.clone())
+            .await
+            .unwrap()
+        {
+            ArtifactLookup::Leader(leader) => leader,
+            other => panic!(
+                "expected leader, got unexpected lookup state: {:?}",
+                type_name(&other)
+            ),
+        };
+        let inflight = leader.inflight.clone();
+        let app_task = app.clone();
+        let upstream_task = upstream_url.clone();
+        let task = tokio::spawn(async move {
+            app_task.run_artifact_fetch(upstream_task, leader).await;
+        });
+        started.notified().await;
+        task.abort();
+        let outcome = timeout(Duration::from_secs(2), inflight.wait_for_outcome())
+            .await
+            .expect("cleanup should resolve inflight")
+            .expect("inflight wait should not error");
+        match outcome {
+            InflightOutcome::Response(meta, body) => {
+                assert_eq!(meta.status, StatusCode::BAD_GATEWAY.as_u16());
+                assert_eq!(body, Bytes::from_static(b"artifact fetch cancelled"));
+            }
+            InflightOutcome::Cached => panic!("unexpected cached outcome"),
+        }
+        match app.cache.lookup_or_start_artifact(key).await.unwrap() {
+            ArtifactLookup::Leader(next) => {
+                next.inflight.fail("test cleanup".to_owned()).await;
+                app.cache.finish_inflight(&next.key).await;
+            }
+            ArtifactLookup::Join(_) => panic!("stale inflight entry remained after abort"),
+            ArtifactLookup::Hit(_) => panic!("unexpected cached artifact after abort"),
+        }
+    }
+
+    async fn slow_upstream(started: Arc<Notify>) -> io::Result<std::net::SocketAddr> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let router = Router::new().route(
+            "/artifact",
+            get(move || {
+                let started = started.clone();
+                async move {
+                    started.notify_waiters();
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                    (StatusCode::OK, Body::from("never reached"))
+                }
+            }),
+        );
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        Ok(addr)
+    }
+
+    fn type_name(lookup: &ArtifactLookup) -> &'static str {
+        match lookup {
+            ArtifactLookup::Hit(_) => "hit",
+            ArtifactLookup::Join(_) => "join",
+            ArtifactLookup::Leader(_) => "leader",
+        }
+    }
 }

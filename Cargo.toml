@@ -3,6 +3,12 @@ name = "vampire"
 version = "0.1.0"
 edition = "2024"
 
+[lints.clippy]
+pedantic = { level = "deny", priority = -1 }
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+
 [dependencies]
 axum = "0.8"
 bytes = "1"

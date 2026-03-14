@@ -4,7 +4,7 @@
 - Allow read-only package installs for PyPI, npm, and Cargo through one internal service.
 - Cache immutable artifacts on local disk.
 - Revalidate cacheable metadata with upstream validators.
-- Bound disk use with `VAMPIRE_MAX_CACHE_SIZE`.
+- Bound disk use with `VAMPIRE_MAX_CACHE_SIZE_MB`.
 
 ## Non-Goals
 - Generic HTTP proxying
@@ -15,9 +15,9 @@
 ## Public Surface
 - `GET|HEAD /pypi/simple/`
 - `GET|HEAD /pypi/simple/{project}/`
-- `GET|HEAD /pypi/files/{filename}?u=...`
+- `GET|HEAD /pypi/files/{path...}`
 - `GET|HEAD /npm/{package}`
-- `GET|HEAD /npm/tarballs/{filename}?u=...`
+- `GET|HEAD /npm/tarballs/{path...}`
 - `GET|HEAD /cargo/index/config.json`
 - `GET|HEAD /cargo/index/...`
 - `GET|HEAD /cargo/api/v1/crates/{crate}/{version}/download`
@@ -29,11 +29,11 @@
 - Published tags are `latest` and `sha-<full git sha>`.
 
 ## Config
-- `VAMPIRE_MAX_CACHE_SIZE` required
+- `VAMPIRE_MAX_CACHE_SIZE_MB` required
 - `VAMPIRE_BIND` default `127.0.0.1:8080`
 - `VAMPIRE_CACHE_DIR` default `./.cache/vampire`
 - `VAMPIRE_MAX_UPSTREAM_FETCHES` default `32`
-- `VAMPIRE_UPSTREAM_TIMEOUT` default `30s`
+- `VAMPIRE_UPSTREAM_TIMEOUT_MS` default `30000`
 
 ## Cache Rules
 - Artifacts are cached by canonical upstream URL until evicted.

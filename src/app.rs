@@ -5,9 +5,8 @@ use crate::cache::{
 use crate::config::Config;
 use crate::failure_log::log_failure;
 use crate::routes::{
-    CacheClass, RegistryOrigins, cargo_config, cargo_download_url, cargo_index_url,
-    npm_packument_url, npm_tarball_url, pypi_file_url, pypi_simple_url, rewrite_npm_json,
-    rewrite_pypi_html,
+    RegistryOrigins, cargo_config, cargo_download_url, cargo_index_url, npm_packument_url,
+    npm_tarball_url, pypi_file_url, pypi_simple_url, rewrite_npm_json, rewrite_pypi_html,
 };
 use crate::stats::AppStats;
 use axum::Router;
@@ -30,6 +29,10 @@ use tokio_util::io::ReaderStream;
 
 #[derive(Clone)]
 pub struct App {
+    inner: Arc<AppInner>,
+}
+
+struct AppInner {
     cache: CacheStore,
     client: Client,
     stats: AppStats,
@@ -43,8 +46,13 @@ enum MetadataRewrite {
     Pypi(String),
 }
 
+enum FetchOutcome {
+    Cached,
+    NonOk(StoredResponseMeta, Bytes),
+}
+
 struct ArtifactFetchCleanup {
-    cache: CacheStore,
+    app: App,
     inflight: Arc<crate::cache::Inflight>,
     key: String,
     temp_path: std::path::PathBuf,
@@ -52,21 +60,6 @@ struct ArtifactFetchCleanup {
 }
 
 impl ArtifactFetchCleanup {
-    fn new(
-        cache: CacheStore,
-        inflight: Arc<crate::cache::Inflight>,
-        key: String,
-        temp_path: std::path::PathBuf,
-    ) -> Self {
-        Self {
-            cache,
-            inflight,
-            key,
-            temp_path,
-            armed: true,
-        }
-    }
-
     fn disarm(&mut self) {
         self.armed = false;
     }
@@ -77,14 +70,14 @@ impl Drop for ArtifactFetchCleanup {
         if !self.armed {
             return;
         }
-        let cache = self.cache.clone();
+        let app = self.app.clone();
         let inflight = self.inflight.clone();
         let key = self.key.clone();
         let temp_path = self.temp_path.clone();
         tokio::spawn(async move {
             let _ = fs::remove_file(&temp_path).await;
             inflight.fail("artifact fetch cancelled".to_owned()).await;
-            cache.finish_inflight(&key).await;
+            app.inner.cache.finish_inflight(&key).await;
         });
     }
 }
@@ -100,10 +93,6 @@ impl App {
         Self::new_with_upstreams(config, client, RegistryOrigins::default()).await
     }
 
-    pub async fn new_with_client(config: Config, client: Client) -> io::Result<Self> {
-        Self::new_with_upstreams(config, client, RegistryOrigins::default()).await
-    }
-
     pub async fn new_with_upstreams(
         config: Config,
         client: Client,
@@ -111,15 +100,17 @@ impl App {
     ) -> io::Result<Self> {
         let cache = CacheStore::new(&config).await?;
         Ok(Self {
-            cache,
-            client,
-            stats: AppStats::default(),
-            upstreams,
+            inner: Arc::new(AppInner {
+                cache,
+                client,
+                stats: AppStats::default(),
+                upstreams,
+            }),
         })
     }
 
-    pub fn stats(&self) -> AppStats {
-        self.stats.clone()
+    pub fn stats(&self) -> &AppStats {
+        &self.inner.stats
     }
 
     pub async fn serve(self, listener: TcpListener) -> io::Result<()> {
@@ -151,11 +142,11 @@ impl App {
                 get(pypi_simple_project_get).head(pypi_simple_project_head),
             )
             .route(
-                "/pypi/files/{filename}",
+                "/pypi/files/{*path}",
                 get(pypi_file_get).head(pypi_file_head),
             )
             .route(
-                "/npm/tarballs/{filename}",
+                "/npm/tarballs/{*path}",
                 get(npm_tarball_get).head(npm_tarball_head),
             )
             .route(
@@ -166,32 +157,34 @@ impl App {
             .with_state(self)
     }
 
-    async fn handle_head(
-        &self,
-        cache_class: CacheClass,
-        upstream: reqwest::Url,
-    ) -> io::Result<Response> {
-        let key = CacheStore::key_for(cache_class, upstream.as_str(), "");
-        match cache_class {
-            CacheClass::Artifact => {
-                if let Some(entry) = self.cache.load_artifact(&key).await? {
-                    return Ok(empty_response_from_meta(entry.meta));
-                }
-            }
-            CacheClass::Metadata => {
-                if let Some(entry) = self.cache.load_metadata(&key).await? {
-                    return Ok(empty_response_from_meta(entry.meta));
-                }
-            }
+    async fn handle_artifact_head(&self, upstream: reqwest::Url) -> io::Result<Response> {
+        let key = CacheStore::artifact_key(upstream.as_str());
+        if let Some(entry) = self.inner.cache.load_artifact(&key).await? {
+            return Ok(empty_response_from_meta(&entry.meta));
         }
         let response = self
-            .client
+            .inner.client
             .head(upstream)
             .send()
             .await
             .map_err(io::Error::other)?;
-        let meta = meta_from_upstream(cache_class, response.status(), response.headers(), 0);
-        Ok(empty_response_from_meta(meta))
+        let meta = meta_from_upstream(response.status(), response.headers(), 0);
+        Ok(empty_response_from_meta(&meta))
+    }
+
+    async fn handle_metadata_head(&self, upstream: reqwest::Url) -> io::Result<Response> {
+        let key = CacheStore::metadata_key(upstream.as_str());
+        if let Some(entry) = self.inner.cache.load_metadata(&key).await? {
+            return Ok(empty_response_from_meta(&entry.meta));
+        }
+        let response = self
+            .inner.client
+            .head(upstream)
+            .send()
+            .await
+            .map_err(io::Error::other)?;
+        let meta = meta_from_upstream(response.status(), response.headers(), 0);
+        Ok(empty_response_from_meta(&meta))
     }
 
     async fn handle_metadata(
@@ -199,14 +192,14 @@ impl App {
         upstream: reqwest::Url,
         rewrite: MetadataRewrite,
     ) -> io::Result<Response> {
-        let key = CacheStore::key_for(CacheClass::Metadata, upstream.as_str(), "");
-        if let Some(entry) = self.cache.load_metadata(&key).await? {
+        let key = CacheStore::metadata_key(upstream.as_str());
+        if let Some(entry) = self.inner.cache.load_metadata(&key).await? {
             if entry.meta.etag.is_some() || entry.meta.last_modified.is_some() {
                 return self
                     .revalidate_metadata(upstream, rewrite, key, entry)
                     .await;
             }
-            return Ok(metadata_response(entry));
+            return Ok(bytes_response(&entry.meta, entry.body));
         }
         self.fetch_metadata(upstream, rewrite, key).await
     }
@@ -218,9 +211,8 @@ impl App {
         key: String,
         entry: StoredMetadata,
     ) -> io::Result<Response> {
-        let mut request = self.client.get(upstream.clone());
-        self.stats
-            .record_fetch(CacheClass::Metadata, upstream.as_str());
+        let mut request = self.inner.client.get(upstream.clone());
+        self.inner.stats.record_metadata_fetch(upstream.as_str());
         if let Some(etag) = &entry.meta.etag {
             request = request.header(IF_NONE_MATCH.as_str(), etag);
         }
@@ -229,7 +221,7 @@ impl App {
         }
         let response = request.send().await.map_err(io::Error::other)?;
         if response.status() == StatusCode::NOT_MODIFIED {
-            return Ok(metadata_response(entry));
+            return Ok(bytes_response(&entry.meta, entry.body));
         }
         self.finish_metadata(rewrite, key, response).await
     }
@@ -240,10 +232,9 @@ impl App {
         rewrite: MetadataRewrite,
         key: String,
     ) -> io::Result<Response> {
-        self.stats
-            .record_fetch(CacheClass::Metadata, upstream.as_str());
+        self.inner.stats.record_metadata_fetch(upstream.as_str());
         let response = self
-            .client
+            .inner.client
             .get(upstream)
             .send()
             .await
@@ -263,31 +254,26 @@ impl App {
         let rewritten = match rewrite {
             MetadataRewrite::None => body.to_vec(),
             MetadataRewrite::Npm(origin) => {
-                rewrite_npm_json(&body, &self.upstreams, &origin).map_err(io::Error::other)?
+                rewrite_npm_json(&body, &self.inner.upstreams, &origin).map_err(io::Error::other)?
             }
             MetadataRewrite::Pypi(origin) => {
-                rewrite_pypi_html(&body, &self.upstreams, &origin).map_err(io::Error::other)?
+                rewrite_pypi_html(&body, &self.inner.upstreams, &origin).map_err(io::Error::other)?
             }
         };
-        let meta = meta_for_bytes(
-            CacheClass::Metadata,
-            status,
-            &upstream_headers,
-            rewritten.len(),
-        );
+        let meta = meta_for_bytes(status, &upstream_headers, rewritten.len());
         if status == StatusCode::OK && (meta.etag.is_some() || meta.last_modified.is_some()) {
-            let entry = self.cache.store_metadata(&key, &rewritten, &meta).await?;
-            return Ok(metadata_response(entry));
+            let entry = self.inner.cache.store_metadata(&key, &rewritten, &meta).await?;
+            return Ok(bytes_response(&entry.meta, entry.body));
         }
-        Ok(bytes_response(meta, Bytes::from(rewritten)))
+        Ok(bytes_response(&meta, Bytes::from(rewritten)))
     }
 
     async fn handle_artifact(&self, upstream: reqwest::Url) -> io::Result<Response> {
-        let key = CacheStore::key_for(CacheClass::Artifact, upstream.as_str(), "");
-        match self.cache.lookup_or_start_artifact(key.clone()).await? {
+        let key = CacheStore::artifact_key(upstream.as_str());
+        match self.inner.cache.lookup_or_start_artifact(key.clone()).await? {
             ArtifactLookup::Hit(entry) => file_response(entry).await,
             ArtifactLookup::Join(inflight) => {
-                self.stats.record_artifact_join(upstream.as_str());
+                self.inner.stats.record_artifact_join(upstream.as_str());
                 self.serve_inflight(&key, inflight).await
             }
             ArtifactLookup::Leader(leader) => {
@@ -312,7 +298,7 @@ impl App {
     ) -> io::Result<Response> {
         match inflight.wait_for_outcome().await? {
             InflightOutcome::Cached => {
-                let entry = self.cache.load_artifact(key).await?.ok_or_else(|| {
+                let entry = self.inner.cache.load_artifact(key).await?.ok_or_else(|| {
                     io::Error::new(
                         io::ErrorKind::NotFound,
                         "artifact missing after inflight completion",
@@ -320,177 +306,139 @@ impl App {
                 })?;
                 file_response(entry).await
             }
-            InflightOutcome::Response(meta, body) => Ok(bytes_response(meta, body)),
+            InflightOutcome::Response(meta, body) => Ok(bytes_response(&meta, body)),
+            InflightOutcome::Failed(error) => Ok(simple_response(
+                StatusCode::BAD_GATEWAY,
+                "text/plain; charset=utf-8",
+                error,
+            )),
         }
     }
 
     async fn run_artifact_fetch(&self, upstream: reqwest::Url, leader: ArtifactLeader) {
-        let upstream_string = upstream.as_str().to_owned();
-        let fail = |stage: &str, error: &str| {
-            log_failure(
-                "artifact_fetch_failed",
-                json!({
-                    "stage": stage,
-                    "upstream": upstream_string,
-                    "cache_key": leader.key,
-                    "error": error,
-                }),
-            );
+        let mut cleanup = ArtifactFetchCleanup {
+            app: self.clone(),
+            inflight: leader.inflight.clone(),
+            key: leader.key.clone(),
+            temp_path: leader.paths.temp.clone(),
+            armed: true,
         };
-        let mut cleanup = ArtifactFetchCleanup::new(
-            self.cache.clone(),
-            leader.inflight.clone(),
-            leader.key.clone(),
-            leader.paths.temp.clone(),
-        );
-        let _permit = match self.cache.acquire_upstream_permit().await {
-            Ok(permit) => permit,
-            Err(error) => {
-                fail("acquire_upstream_permit", &error.to_string());
-                leader.inflight.fail(error.to_string()).await;
-                self.cache.finish_inflight(&leader.key).await;
-                cleanup.disarm();
-                return;
+        let result = self.do_artifact_fetch(&upstream, &leader).await;
+        if result.is_err() {
+            let _ = fs::remove_file(&leader.paths.temp).await;
+        }
+        match result {
+            Ok(FetchOutcome::Cached) => leader.inflight.finish_cached().await,
+            Ok(FetchOutcome::NonOk(meta, body)) => {
+                leader.inflight.finish_response(meta, body).await;
             }
-        };
-        self.stats
-            .record_fetch(CacheClass::Artifact, upstream.as_str());
-        let response = match self.client.get(upstream).send().await {
-            Ok(response) => response,
-            Err(error) => {
-                let error = io::Error::other(error);
-                fail("fetch_upstream", &error.to_string());
-                leader.inflight.fail(error.to_string()).await;
-                self.cache.finish_inflight(&leader.key).await;
-                cleanup.disarm();
-                return;
+            Err((stage, error)) => {
+                log_failure(
+                    "artifact_fetch_failed",
+                    json!({
+                        "stage": stage,
+                        "upstream": upstream.as_str(),
+                        "cache_key": leader.key,
+                        "error": error,
+                    }),
+                );
+                leader.inflight.fail(error).await;
             }
-        };
+        }
+        self.inner.cache.finish_inflight(&leader.key).await;
+        cleanup.disarm();
+    }
+
+    async fn do_artifact_fetch(
+        &self,
+        upstream: &reqwest::Url,
+        leader: &ArtifactLeader,
+    ) -> Result<FetchOutcome, (String, String)> {
+        let _permit = self
+            .inner
+            .cache
+            .acquire_upstream_permit()
+            .await
+            .map_err(|e| ("acquire_upstream_permit".into(), e.to_string()))?;
+        self.inner.stats.record_artifact_fetch(upstream.as_str());
+        let response = self
+            .inner
+            .client
+            .get(upstream.clone())
+            .send()
+            .await
+            .map_err(|e| ("fetch_upstream".into(), io::Error::other(e).to_string()))?;
         let status = response.status();
         let headers = response.headers().clone();
         if status != StatusCode::OK {
-            let body = match response.bytes().await {
-                Ok(body) => body,
-                Err(error) => {
-                    let error = io::Error::other(error);
-                    fail("read_error_response", &error.to_string());
-                    leader.inflight.fail(error.to_string()).await;
-                    self.cache.finish_inflight(&leader.key).await;
-                    cleanup.disarm();
-                    return;
-                }
-            };
-            let meta = meta_for_bytes(CacheClass::Artifact, status, &headers, body.len());
-            leader
-                .inflight
-                .finish_response(meta.clone(), body.clone())
-                .await;
-            self.cache.finish_inflight(&leader.key).await;
-            cleanup.disarm();
-            return;
+            let body = response
+                .bytes()
+                .await
+                .map_err(|e| ("read_error_response".into(), io::Error::other(e).to_string()))?;
+            let meta = meta_for_bytes(status, &headers, body.len());
+            return Ok(FetchOutcome::NonOk(meta, body));
         }
-        if let Some(parent) = leader.paths.temp.parent() {
-            if let Err(error) = fs::create_dir_all(parent).await {
-                fail("create_temp_dir", &error.to_string());
-                leader.inflight.fail(error.to_string()).await;
-                self.cache.finish_inflight(&leader.key).await;
-                cleanup.disarm();
-                return;
-            }
-        }
-        let mut file = match fs::File::create(&leader.paths.temp).await {
-            Ok(file) => file,
-            Err(error) => {
-                fail("create_temp_file", &error.to_string());
-                leader.inflight.fail(error.to_string()).await;
-                self.cache.finish_inflight(&leader.key).await;
-                cleanup.disarm();
-                return;
-            }
-        };
+        let mut file = fs::File::create(&leader.paths.temp)
+            .await
+            .map_err(|e| ("create_temp_file".into(), e.to_string()))?;
         let mut response = response;
         let mut content_length = 0;
         loop {
-            let chunk = match response.chunk().await {
-                Ok(chunk) => chunk,
-                Err(error) => {
-                    let error = io::Error::other(error);
-                    let _ = fs::remove_file(&leader.paths.temp).await;
-                    fail("read_upstream_stream", &error.to_string());
-                    leader.inflight.fail(error.to_string()).await;
-                    self.cache.finish_inflight(&leader.key).await;
-                    cleanup.disarm();
-                    return;
-                }
-            };
+            let chunk = response
+                .chunk()
+                .await
+                .map_err(|e| ("read_upstream_stream".into(), io::Error::other(e).to_string()))?;
             let Some(chunk) = chunk else {
                 break;
             };
-            if let Err(error) = file.write_all(&chunk).await {
-                let _ = fs::remove_file(&leader.paths.temp).await;
-                fail("write_temp_file", &error.to_string());
-                leader.inflight.fail(error.to_string()).await;
-                self.cache.finish_inflight(&leader.key).await;
-                cleanup.disarm();
-                return;
-            }
+            file.write_all(&chunk)
+                .await
+                .map_err(|e| ("write_temp_file".into(), e.to_string()))?;
             content_length += chunk.len();
         }
-        if let Err(error) = file.flush().await {
-            drop(file);
-            let _ = fs::remove_file(&leader.paths.temp).await;
-            fail("flush_temp_file", &error.to_string());
-            leader.inflight.fail(error.to_string()).await;
-            self.cache.finish_inflight(&leader.key).await;
-            cleanup.disarm();
-            return;
-        }
+        file.flush()
+            .await
+            .map_err(|e| ("flush_temp_file".into(), e.to_string()))?;
         drop(file);
-        let meta = meta_from_upstream(CacheClass::Artifact, status, &headers, content_length);
-        let entry = match self
+        let meta = meta_from_upstream(status, &headers, content_length);
+        self.inner
             .cache
             .commit_artifact(&leader.key, &meta, &leader.paths.temp)
             .await
-        {
-            Ok(entry) => entry,
-            Err(error) => {
-                let _ = fs::remove_file(&leader.paths.temp).await;
-                fail("commit_cache_entry", &error.to_string());
-                leader.inflight.fail(error.to_string()).await;
-                self.cache.finish_inflight(&leader.key).await;
-                cleanup.disarm();
-                return;
-            }
-        };
-        leader.inflight.finish_cached().await;
-        self.cache.finish_inflight(&leader.key).await;
-        cleanup.disarm();
-        let _ = entry;
+            .map_err(|e| ("commit_cache_entry".into(), e.to_string()))?;
+        Ok(FetchOutcome::Cached)
     }
 }
 
 async fn cargo_config_get(State(_app): State<App>, headers: HeaderMap) -> Response {
     let origin = request_origin(&headers);
-    json_response(StatusCode::OK, cargo_config(&origin))
+    let body = cargo_config(&origin);
+    let len = body.len();
+    let mut response = Response::new(Body::from(body));
+    let headers = response.headers_mut();
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    headers.insert(
+        CONTENT_LENGTH,
+        HeaderValue::from_str(&len.to_string()).expect("content length"),
+    );
+    response
 }
 
 async fn cargo_config_head(State(_app): State<App>) -> Response {
-    empty_response(StatusCode::OK)
+    Response::new(Body::empty())
 }
 
 async fn cargo_index_get(
     State(app): State<App>,
     Path(path): Path<String>,
     OriginalUri(uri): OriginalUri,
-    headers: HeaderMap,
 ) -> Response {
-    let Some(upstream) = cargo_index_url(&app.upstreams, &path) else {
+    let Some(upstream) = cargo_index_url(&app.inner.upstreams, &path) else {
         return not_found().await;
     };
-    let _origin = request_origin(&headers);
     app.handle_metadata(upstream, MetadataRewrite::None)
         .await
-        .unwrap_or_else(|error| request_failed_response("GET", &uri, error))
+        .unwrap_or_else(|error| request_failed_response("GET", &uri, &error))
 }
 
 async fn cargo_index_head(
@@ -498,12 +446,12 @@ async fn cargo_index_head(
     Path(path): Path<String>,
     OriginalUri(uri): OriginalUri,
 ) -> Response {
-    let Some(upstream) = cargo_index_url(&app.upstreams, &path) else {
+    let Some(upstream) = cargo_index_url(&app.inner.upstreams, &path) else {
         return not_found().await;
     };
-    app.handle_head(CacheClass::Metadata, upstream)
+    app.handle_metadata_head(upstream)
         .await
-        .unwrap_or_else(|error| request_failed_response("HEAD", &uri, error))
+        .unwrap_or_else(|error| request_failed_response("HEAD", &uri, &error))
 }
 
 async fn cargo_download_get(
@@ -511,12 +459,12 @@ async fn cargo_download_get(
     Path((crate_name, version)): Path<(String, String)>,
     OriginalUri(uri): OriginalUri,
 ) -> Response {
-    let Some(upstream) = cargo_download_url(&app.upstreams, &crate_name, &version) else {
+    let Some(upstream) = cargo_download_url(&app.inner.upstreams, &crate_name, &version) else {
         return not_found().await;
     };
     app.handle_artifact(upstream)
         .await
-        .unwrap_or_else(|error| request_failed_response("GET", &uri, error))
+        .unwrap_or_else(|error| request_failed_response("GET", &uri, &error))
 }
 
 async fn cargo_download_head(
@@ -524,12 +472,12 @@ async fn cargo_download_head(
     Path((crate_name, version)): Path<(String, String)>,
     OriginalUri(uri): OriginalUri,
 ) -> Response {
-    let Some(upstream) = cargo_download_url(&app.upstreams, &crate_name, &version) else {
+    let Some(upstream) = cargo_download_url(&app.inner.upstreams, &crate_name, &version) else {
         return not_found().await;
     };
-    app.handle_head(CacheClass::Artifact, upstream)
+    app.handle_artifact_head(upstream)
         .await
-        .unwrap_or_else(|error| request_failed_response("HEAD", &uri, error))
+        .unwrap_or_else(|error| request_failed_response("HEAD", &uri, &error))
 }
 
 async fn pypi_simple_root_get(
@@ -538,21 +486,21 @@ async fn pypi_simple_root_get(
     headers: HeaderMap,
 ) -> Response {
     let origin = request_origin(&headers);
-    let Some(upstream) = pypi_simple_url(&app.upstreams, None) else {
+    let Some(upstream) = pypi_simple_url(&app.inner.upstreams, None) else {
         return not_found().await;
     };
     app.handle_metadata(upstream, MetadataRewrite::Pypi(origin))
         .await
-        .unwrap_or_else(|error| request_failed_response("GET", &uri, error))
+        .unwrap_or_else(|error| request_failed_response("GET", &uri, &error))
 }
 
 async fn pypi_simple_root_head(State(app): State<App>, OriginalUri(uri): OriginalUri) -> Response {
-    let Some(upstream) = pypi_simple_url(&app.upstreams, None) else {
+    let Some(upstream) = pypi_simple_url(&app.inner.upstreams, None) else {
         return not_found().await;
     };
-    app.handle_head(CacheClass::Metadata, upstream)
+    app.handle_metadata_head(upstream)
         .await
-        .unwrap_or_else(|error| request_failed_response("HEAD", &uri, error))
+        .unwrap_or_else(|error| request_failed_response("HEAD", &uri, &error))
 }
 
 async fn pypi_simple_project_get(
@@ -562,12 +510,12 @@ async fn pypi_simple_project_get(
     headers: HeaderMap,
 ) -> Response {
     let origin = request_origin(&headers);
-    let Some(upstream) = pypi_simple_url(&app.upstreams, Some(&project)) else {
+    let Some(upstream) = pypi_simple_url(&app.inner.upstreams, Some(&project)) else {
         return not_found().await;
     };
     app.handle_metadata(upstream, MetadataRewrite::Pypi(origin))
         .await
-        .unwrap_or_else(|error| request_failed_response("GET", &uri, error))
+        .unwrap_or_else(|error| request_failed_response("GET", &uri, &error))
 }
 
 async fn pypi_simple_project_head(
@@ -575,30 +523,38 @@ async fn pypi_simple_project_head(
     Path(project): Path<String>,
     OriginalUri(uri): OriginalUri,
 ) -> Response {
-    let Some(upstream) = pypi_simple_url(&app.upstreams, Some(&project)) else {
+    let Some(upstream) = pypi_simple_url(&app.inner.upstreams, Some(&project)) else {
         return not_found().await;
     };
-    app.handle_head(CacheClass::Metadata, upstream)
+    app.handle_metadata_head(upstream)
         .await
-        .unwrap_or_else(|error| request_failed_response("HEAD", &uri, error))
+        .unwrap_or_else(|error| request_failed_response("HEAD", &uri, &error))
 }
 
-async fn pypi_file_get(State(app): State<App>, OriginalUri(uri): OriginalUri) -> Response {
-    let Some(upstream) = pypi_file_url(uri.query(), &app.upstreams) else {
+async fn pypi_file_get(
+    State(app): State<App>,
+    Path(path): Path<String>,
+    OriginalUri(uri): OriginalUri,
+) -> Response {
+    let Some(upstream) = pypi_file_url(&path, &app.inner.upstreams) else {
         return not_found().await;
     };
     app.handle_artifact(upstream)
         .await
-        .unwrap_or_else(|error| request_failed_response("GET", &uri, error))
+        .unwrap_or_else(|error| request_failed_response("GET", &uri, &error))
 }
 
-async fn pypi_file_head(State(app): State<App>, OriginalUri(uri): OriginalUri) -> Response {
-    let Some(upstream) = pypi_file_url(uri.query(), &app.upstreams) else {
+async fn pypi_file_head(
+    State(app): State<App>,
+    Path(path): Path<String>,
+    OriginalUri(uri): OriginalUri,
+) -> Response {
+    let Some(upstream) = pypi_file_url(&path, &app.inner.upstreams) else {
         return not_found().await;
     };
-    app.handle_head(CacheClass::Artifact, upstream)
+    app.handle_artifact_head(upstream)
         .await
-        .unwrap_or_else(|error| request_failed_response("HEAD", &uri, error))
+        .unwrap_or_else(|error| request_failed_response("HEAD", &uri, &error))
 }
 
 async fn npm_packument_get(
@@ -610,42 +566,50 @@ async fn npm_packument_get(
     let Some(package) = raw_path_tail(&uri, "/npm/") else {
         return not_found().await;
     };
-    let Some(upstream) = npm_packument_url(&app.upstreams, package) else {
+    let Some(upstream) = npm_packument_url(&app.inner.upstreams, package) else {
         return not_found().await;
     };
     app.handle_metadata(upstream, MetadataRewrite::Npm(origin))
         .await
-        .unwrap_or_else(|error| request_failed_response("GET", &uri, error))
+        .unwrap_or_else(|error| request_failed_response("GET", &uri, &error))
 }
 
 async fn npm_packument_head(State(app): State<App>, OriginalUri(uri): OriginalUri) -> Response {
     let Some(package) = raw_path_tail(&uri, "/npm/") else {
         return not_found().await;
     };
-    let Some(upstream) = npm_packument_url(&app.upstreams, package) else {
+    let Some(upstream) = npm_packument_url(&app.inner.upstreams, package) else {
         return not_found().await;
     };
-    app.handle_head(CacheClass::Metadata, upstream)
+    app.handle_metadata_head(upstream)
         .await
-        .unwrap_or_else(|error| request_failed_response("HEAD", &uri, error))
+        .unwrap_or_else(|error| request_failed_response("HEAD", &uri, &error))
 }
 
-async fn npm_tarball_get(State(app): State<App>, OriginalUri(uri): OriginalUri) -> Response {
-    let Some(upstream) = npm_tarball_url(uri.query(), &app.upstreams) else {
+async fn npm_tarball_get(
+    State(app): State<App>,
+    Path(path): Path<String>,
+    OriginalUri(uri): OriginalUri,
+) -> Response {
+    let Some(upstream) = npm_tarball_url(&path, &app.inner.upstreams) else {
         return not_found().await;
     };
     app.handle_artifact(upstream)
         .await
-        .unwrap_or_else(|error| request_failed_response("GET", &uri, error))
+        .unwrap_or_else(|error| request_failed_response("GET", &uri, &error))
 }
 
-async fn npm_tarball_head(State(app): State<App>, OriginalUri(uri): OriginalUri) -> Response {
-    let Some(upstream) = npm_tarball_url(uri.query(), &app.upstreams) else {
+async fn npm_tarball_head(
+    State(app): State<App>,
+    Path(path): Path<String>,
+    OriginalUri(uri): OriginalUri,
+) -> Response {
+    let Some(upstream) = npm_tarball_url(&path, &app.inner.upstreams) else {
         return not_found().await;
     };
-    app.handle_head(CacheClass::Artifact, upstream)
+    app.handle_artifact_head(upstream)
         .await
-        .unwrap_or_else(|error| request_failed_response("HEAD", &uri, error))
+        .unwrap_or_else(|error| request_failed_response("HEAD", &uri, &error))
 }
 
 async fn not_found() -> Response {
@@ -656,7 +620,7 @@ async fn not_found() -> Response {
     )
 }
 
-fn request_failed_response(method: &str, uri: &Uri, error: io::Error) -> Response {
+fn request_failed_response(method: &str, uri: &Uri, error: &io::Error) -> Response {
     log_failure(
         "request_failed",
         json!({
@@ -686,7 +650,6 @@ fn request_origin(headers: &HeaderMap) -> String {
 }
 
 fn meta_from_upstream(
-    cache_class: CacheClass,
     status: StatusCode,
     headers: &ReqwestHeaderMap,
     content_length: usize,
@@ -710,7 +673,6 @@ fn meta_from_upstream(
         ));
     }
     StoredResponseMeta {
-        cache_class,
         headers: stored_headers,
         last_modified: headers
             .get(reqwest::header::LAST_MODIFIED)
@@ -725,12 +687,11 @@ fn meta_from_upstream(
 }
 
 fn meta_for_bytes(
-    cache_class: CacheClass,
     status: StatusCode,
     headers: &ReqwestHeaderMap,
     content_length: usize,
 ) -> StoredResponseMeta {
-    let mut meta = meta_from_upstream(cache_class, status, headers, content_length);
+    let mut meta = meta_from_upstream(status, headers, content_length);
     if !meta
         .headers
         .iter()
@@ -752,18 +713,14 @@ async fn file_response(entry: StoredArtifact) -> io::Result<Response> {
     Ok(response)
 }
 
-fn metadata_response(entry: StoredMetadata) -> Response {
-    bytes_response(entry.meta, entry.body)
-}
-
-fn bytes_response(meta: StoredResponseMeta, body: Bytes) -> Response {
+fn bytes_response(meta: &StoredResponseMeta, body: Bytes) -> Response {
     let mut response = Response::new(Body::from(body));
     *response.status_mut() = StatusCode::from_u16(meta.status).unwrap_or(StatusCode::OK);
     apply_headers(response.headers_mut(), &meta.headers);
     response
 }
 
-fn empty_response_from_meta(meta: StoredResponseMeta) -> Response {
+fn empty_response_from_meta(meta: &StoredResponseMeta) -> Response {
     let mut response = Response::new(Body::empty());
     *response.status_mut() = StatusCode::from_u16(meta.status).unwrap_or(StatusCode::OK);
     apply_headers(response.headers_mut(), &meta.headers);
@@ -791,17 +748,9 @@ fn raw_path_tail<'a>(uri: &'a Uri, prefix: &str) -> Option<&'a str> {
 }
 
 fn is_hop_header(name: &str) -> bool {
-    matches!(
-        name.to_ascii_lowercase().as_str(),
-        "connection"
-            | "keep-alive"
-            | "proxy-authenticate"
-            | "proxy-authorization"
-            | "te"
-            | "trailer"
-            | "transfer-encoding"
-            | "upgrade"
-    )
+    ["connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
+     "te", "trailer", "transfer-encoding", "upgrade"]
+        .iter().any(|h| name.eq_ignore_ascii_case(h))
 }
 
 fn simple_response(
@@ -810,32 +759,15 @@ fn simple_response(
     body: impl Into<String>,
 ) -> Response {
     let body = body.into();
-    let mut response = Response::new(Body::from(body.clone()));
+    let len = body.len();
+    let mut response = Response::new(Body::from(body));
     *response.status_mut() = status;
     let headers = response.headers_mut();
     headers.insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
     headers.insert(
         CONTENT_LENGTH,
-        HeaderValue::from_str(&body.len().to_string()).expect("content length"),
+        HeaderValue::from_str(&len.to_string()).expect("content length"),
     );
-    response
-}
-
-fn json_response(status: StatusCode, body: Vec<u8>) -> Response {
-    let mut response = Response::new(Body::from(body.clone()));
-    *response.status_mut() = status;
-    let headers = response.headers_mut();
-    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-    headers.insert(
-        CONTENT_LENGTH,
-        HeaderValue::from_str(&body.len().to_string()).expect("content length"),
-    );
-    response
-}
-
-fn empty_response(status: StatusCode) -> Response {
-    let mut response = Response::new(Body::empty());
-    *response.status_mut() = status;
     response
 }
 
@@ -848,7 +780,6 @@ mod tests {
     use axum::body::Body;
     use axum::http::StatusCode;
     use axum::routing::get;
-    use bytes::Bytes;
     use reqwest::Client;
     use std::io;
     use std::path::PathBuf;
@@ -878,13 +809,9 @@ mod tests {
             .await
             .unwrap();
         let upstream_url = reqwest::Url::parse(&format!("http://{}/artifact", upstream)).unwrap();
-        let key = crate::cache::CacheStore::key_for(
-            crate::routes::CacheClass::Artifact,
-            upstream_url.as_str(),
-            "",
-        );
+        let key = crate::cache::CacheStore::artifact_key(upstream_url.as_str());
         let leader = match app
-            .cache
+            .inner.cache
             .lookup_or_start_artifact(key.clone())
             .await
             .unwrap()
@@ -908,16 +835,17 @@ mod tests {
             .expect("cleanup should resolve inflight")
             .expect("inflight wait should not error");
         match outcome {
-            InflightOutcome::Response(meta, body) => {
-                assert_eq!(meta.status, StatusCode::BAD_GATEWAY.as_u16());
-                assert_eq!(body, Bytes::from_static(b"artifact fetch cancelled"));
+            InflightOutcome::Failed(error) => {
+                assert_eq!(error, "artifact fetch cancelled");
             }
-            InflightOutcome::Cached => panic!("unexpected cached outcome"),
+            InflightOutcome::Cached | InflightOutcome::Response(_, _) => {
+                panic!("expected Failed outcome")
+            }
         }
-        match app.cache.lookup_or_start_artifact(key).await.unwrap() {
+        match app.inner.cache.lookup_or_start_artifact(key).await.unwrap() {
             ArtifactLookup::Leader(next) => {
                 next.inflight.fail("test cleanup".to_owned()).await;
-                app.cache.finish_inflight(&next.key).await;
+                app.inner.cache.finish_inflight(&next.key).await;
             }
             ArtifactLookup::Join(_) => panic!("stale inflight entry remained after abort"),
             ArtifactLookup::Hit(_) => panic!("unexpected cached artifact after abort"),

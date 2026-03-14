@@ -5,6 +5,7 @@ pub fn log_failure(event: &str, data: Value) {
     eprintln!("{}", format_failure(event, data));
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn format_failure(event: &str, data: Value) -> String {
     json!({
         "ts_ms": now_millis(),

@@ -2,7 +2,7 @@
 
 Vampire is a minimal Rust proxy for read-only PyPI, npm, and Cargo package installs.
 
-It is built for controlled environments such as agent sandboxes, where package installs need to work without opening general outbound internet access. Vampire is intentionally narrow: it serves package-manager traffic, keeps artifacts on local disk, and bounds cache growth with `VAMPIRE_MAX_CACHE_SIZE`. It is not a general web proxy, and it does not implement publish or auth APIs.
+It is built for controlled environments such as agent sandboxes, where package installs need to work without opening general outbound internet access. Vampire is intentionally narrow: it serves package-manager traffic, keeps artifacts on local disk, and bounds cache growth with `VAMPIRE_MAX_CACHE_SIZE_MB`. It is not a general web proxy, and it does not implement publish or auth APIs.
 
 ## Run
 
@@ -12,22 +12,22 @@ Container-first:
 docker run --rm \
   -p 8080:8080 \
   -v vampire-cache:/var/lib/vampire \
-  -e VAMPIRE_MAX_CACHE_SIZE=10GiB \
+  -e VAMPIRE_MAX_CACHE_SIZE_MB=10000 \
   ghcr.io/cwwarren/vampire:latest
 ```
 
 Local build:
 
 ```bash
-VAMPIRE_MAX_CACHE_SIZE=10GiB cargo run
+VAMPIRE_MAX_CACHE_SIZE_MB=10000 cargo run
 ```
 
 Useful server env vars:
-- `VAMPIRE_MAX_CACHE_SIZE` required
+- `VAMPIRE_MAX_CACHE_SIZE_MB` required
 - `VAMPIRE_BIND` default `127.0.0.1:8080`
 - `VAMPIRE_CACHE_DIR` default `./.cache/vampire`
 - `VAMPIRE_MAX_UPSTREAM_FETCHES` default `32`
-- `VAMPIRE_UPSTREAM_TIMEOUT` default `30s`
+- `VAMPIRE_UPSTREAM_TIMEOUT_MS` default `30000`
 
 ## Sandbox Usage
 

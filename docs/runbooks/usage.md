@@ -2,7 +2,7 @@
 
 ## Start
 ```bash
-VAMPIRE_MAX_CACHE_SIZE=10GiB cargo run
+VAMPIRE_MAX_CACHE_SIZE_MB=10000 cargo run
 ```
 
 ## Container
@@ -10,7 +10,7 @@ VAMPIRE_MAX_CACHE_SIZE=10GiB cargo run
 docker run --rm \
   -p 8080:8080 \
   -v vampire-cache:/var/lib/vampire \
-  -e VAMPIRE_MAX_CACHE_SIZE=10GiB \
+  -e VAMPIRE_MAX_CACHE_SIZE_MB=10000 \
   ghcr.io/cwwarren/vampire:latest
 ```
 

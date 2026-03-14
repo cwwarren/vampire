@@ -9,7 +9,7 @@ use tokio::fs;
 use tokio::net::TcpListener;
 use tokio::process::Command;
 use tokio::time::{Duration, Instant, sleep};
-use vampire::{App, AppStats, Config, StatsSnapshot};
+use vampire::{App, Config, StatsSnapshot};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "hits live package registries"]
@@ -19,13 +19,13 @@ async fn pypi_real_e2e_cold_warm_concurrent() {
     run_pip_install(&fixture.base_url, fixture.temp.path(), "cold-a")
         .await
         .unwrap();
-    assert_has_artifact_fetches(&fixture.stats.snapshot(), "pypi cold");
+    assert_has_artifact_fetches(&fixture.app.stats().snapshot(), "pypi cold");
 
-    fixture.stats.reset();
+    fixture.app.stats().reset();
     run_pip_install(&fixture.base_url, fixture.temp.path(), "warm-a")
         .await
         .unwrap();
-    assert_no_artifact_fetches(&fixture.stats.snapshot(), "pypi warm");
+    assert_no_artifact_fetches(&fixture.app.stats().snapshot(), "pypi warm");
 
     let concurrent = RealFixture::new().await.unwrap();
     let first = run_pip_install(&concurrent.base_url, concurrent.temp.path(), "concurrent-a");
@@ -33,7 +33,7 @@ async fn pypi_real_e2e_cold_warm_concurrent() {
     let (first, second) = tokio::join!(first, second);
     first.unwrap();
     second.unwrap();
-    assert_no_duplicate_artifact_fetches(&concurrent.stats.snapshot(), "pypi concurrent");
+    assert_no_duplicate_artifact_fetches(&concurrent.app.stats().snapshot(), "pypi concurrent");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -44,13 +44,13 @@ async fn npm_real_e2e_cold_warm_concurrent() {
     run_npm_install(&fixture.base_url, fixture.temp.path(), "cold-a")
         .await
         .unwrap();
-    assert_has_artifact_fetches(&fixture.stats.snapshot(), "npm cold");
+    assert_has_artifact_fetches(&fixture.app.stats().snapshot(), "npm cold");
 
-    fixture.stats.reset();
+    fixture.app.stats().reset();
     run_npm_install(&fixture.base_url, fixture.temp.path(), "warm-a")
         .await
         .unwrap();
-    assert_no_artifact_fetches(&fixture.stats.snapshot(), "npm warm");
+    assert_no_artifact_fetches(&fixture.app.stats().snapshot(), "npm warm");
 
     let concurrent = RealFixture::new().await.unwrap();
     let first = run_npm_install(&concurrent.base_url, concurrent.temp.path(), "concurrent-a");
@@ -58,7 +58,7 @@ async fn npm_real_e2e_cold_warm_concurrent() {
     let (first, second) = tokio::join!(first, second);
     first.unwrap();
     second.unwrap();
-    assert_no_duplicate_artifact_fetches(&concurrent.stats.snapshot(), "npm concurrent");
+    assert_no_duplicate_artifact_fetches(&concurrent.app.stats().snapshot(), "npm concurrent");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -69,13 +69,13 @@ async fn cargo_real_e2e_cold_warm_concurrent() {
     run_cargo_build(&fixture.base_url, fixture.temp.path(), "cold-a")
         .await
         .unwrap();
-    assert_has_artifact_fetches(&fixture.stats.snapshot(), "cargo cold");
+    assert_has_artifact_fetches(&fixture.app.stats().snapshot(), "cargo cold");
 
-    fixture.stats.reset();
+    fixture.app.stats().reset();
     run_cargo_build(&fixture.base_url, fixture.temp.path(), "warm-a")
         .await
         .unwrap();
-    assert_no_artifact_fetches(&fixture.stats.snapshot(), "cargo warm");
+    assert_no_artifact_fetches(&fixture.app.stats().snapshot(), "cargo warm");
 
     let concurrent = RealFixture::new().await.unwrap();
     let first = run_cargo_build(&concurrent.base_url, concurrent.temp.path(), "concurrent-a");
@@ -83,13 +83,13 @@ async fn cargo_real_e2e_cold_warm_concurrent() {
     let (first, second) = tokio::join!(first, second);
     first.unwrap();
     second.unwrap();
-    assert_no_duplicate_artifact_fetches(&concurrent.stats.snapshot(), "cargo concurrent");
+    assert_no_duplicate_artifact_fetches(&concurrent.app.stats().snapshot(), "cargo concurrent");
 }
 
 struct RealFixture {
     temp: TempDir,
     base_url: String,
-    stats: AppStats,
+    app: App,
 }
 
 impl RealFixture {
@@ -107,16 +107,16 @@ impl RealFixture {
             upstream_timeout: Duration::from_secs(300),
         };
         let app = App::new(config).await?;
-        let stats = app.stats();
+        let app_serve = app.clone();
         tokio::spawn(async move {
-            let _ = app.serve(listener).await;
+            let _ = app_serve.serve(listener).await;
         });
         let base_url = format!("http://{bind}");
         wait_ready(&base_url).await?;
         Ok(Self {
             temp,
             base_url,
-            stats,
+            app,
         })
     }
 }

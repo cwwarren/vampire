@@ -1,14 +1,7 @@
 use regex::Regex;
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::OnceLock;
 use url::Url;
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub enum CacheClass {
-    Artifact,
-    Metadata,
-}
 
 #[derive(Clone, Debug)]
 pub struct RegistryOrigins {
@@ -65,8 +58,8 @@ pub fn pypi_simple_url(upstreams: &RegistryOrigins, project: Option<&str>) -> Op
     }
 }
 
-pub fn pypi_file_url(query: Option<&str>, upstreams: &RegistryOrigins) -> Option<Url> {
-    upstream_from_query(query?, &upstreams.pypi_files)
+pub fn pypi_file_url(path: &str, upstreams: &RegistryOrigins) -> Option<Url> {
+    join_url(&upstreams.pypi_files, path)
 }
 
 pub fn npm_packument_url(upstreams: &RegistryOrigins, package: &str) -> Option<Url> {
@@ -76,8 +69,8 @@ pub fn npm_packument_url(upstreams: &RegistryOrigins, package: &str) -> Option<U
     join_url(&upstreams.npm, package)
 }
 
-pub fn npm_tarball_url(query: Option<&str>, upstreams: &RegistryOrigins) -> Option<Url> {
-    upstream_from_query(query?, &upstreams.npm)
+pub fn npm_tarball_url(path: &str, upstreams: &RegistryOrigins) -> Option<Url> {
+    join_url(&upstreams.npm, path)
 }
 
 pub fn rewrite_pypi_html(
@@ -85,8 +78,8 @@ pub fn rewrite_pypi_html(
     upstreams: &RegistryOrigins,
     origin: &str,
 ) -> Result<Vec<u8>, String> {
-    let input = String::from_utf8(body.to_vec()).map_err(|error| error.to_string())?;
-    let output = href_regex().replace_all(&input, |captures: &regex::Captures<'_>| {
+    let input = std::str::from_utf8(body).map_err(|error| error.to_string())?;
+    let output = href_regex().replace_all(input, |captures: &regex::Captures<'_>| {
         if let Some(href) = captures.get(1) {
             let rewritten = rewrite_pypi_href(href.as_str(), upstreams, origin);
             return format!("href=\"{rewritten}\"");
@@ -143,17 +136,9 @@ fn rewrite_pypi_href(href: &str, upstreams: &RegistryOrigins, origin: &str) -> S
                 .fragment()
                 .map(|fragment| format!("#{fragment}"))
                 .unwrap_or_default();
-            let mut stripped = normalize_url(url, &upstreams.pypi_files);
-            stripped.set_fragment(None);
-            let filename = stripped
-                .path_segments()
-                .and_then(|segments| segments.last())
-                .unwrap_or("artifact");
-            return format!(
-                "{origin}/pypi/files/{filename}?u={}",
-                url::form_urlencoded::byte_serialize(stripped.as_str().as_bytes())
-                    .collect::<String>()
-            ) + &fragment;
+            let normalized = normalize_url(url, &upstreams.pypi_files);
+            let path = normalized.path().strip_prefix('/').unwrap_or(normalized.path());
+            return format!("{origin}/pypi/files/{path}{fragment}");
         }
         if (matches_origin(&url, &upstreams.pypi_simple) || url.host_str() == Some("pypi.org"))
             && url.path().starts_with("/simple/")
@@ -170,21 +155,8 @@ fn rewrite_npm_tarball(input: &str, upstreams: &RegistryOrigins, origin: &str) -
         return None;
     }
     let url = normalize_url(url, &upstreams.npm);
-    let filename = url
-        .path_segments()
-        .and_then(|segments| segments.last())
-        .unwrap_or("package.tgz");
-    Some(format!(
-        "{origin}/npm/tarballs/{filename}?u={}",
-        url::form_urlencoded::byte_serialize(url.as_str().as_bytes()).collect::<String>()
-    ))
-}
-
-fn upstream_from_query(query: &str, base: &Url) -> Option<Url> {
-    let upstream = url::form_urlencoded::parse(query.as_bytes())
-        .find_map(|(key, value)| (key == "u").then(|| value.into_owned()))?;
-    let url = Url::parse(&upstream).ok()?;
-    matches_origin(&url, base).then_some(url)
+    let path = url.path().strip_prefix('/').unwrap_or(url.path());
+    Some(format!("{origin}/npm/tarballs/{path}"))
 }
 
 fn join_url(base: &Url, path: &str) -> Option<Url> {
@@ -228,20 +200,8 @@ mod tests {
         assert!(cargo_download_url(&upstreams, "serde", "1.0.0").is_some());
         assert!(npm_packument_url(&upstreams, "@scope%2fname").is_some());
         assert!(pypi_simple_url(&upstreams, Some("pkg/")).is_some());
-        assert!(
-            pypi_file_url(
-                Some("u=https%3A%2F%2Ffiles.pythonhosted.org%2Fpackages%2Fpkg.whl"),
-                &upstreams
-            )
-            .is_some()
-        );
-        assert!(
-            npm_tarball_url(
-                Some("u=https%3A%2F%2Fregistry.npmjs.org%2Fpkg%2F-%2Fpkg-1.0.0.tgz"),
-                &upstreams
-            )
-            .is_some()
-        );
+        assert!(pypi_file_url("packages/pkg.whl", &upstreams).is_some());
+        assert!(npm_tarball_url("pkg/-/pkg-1.0.0.tgz", &upstreams).is_some());
     }
 
     #[test]
@@ -252,8 +212,7 @@ mod tests {
         let rewritten =
             String::from_utf8(rewrite_pypi_html(body, &upstreams, "http://localhost").unwrap())
                 .unwrap();
-        assert!(rewritten.contains("http://localhost/pypi/files/pkg.whl?u="));
-        assert!(rewritten.contains("#sha256=abc"));
+        assert!(rewritten.contains("http://localhost/pypi/files/packages/pkg.whl#sha256=abc"));
     }
 
     #[test]
@@ -275,7 +234,7 @@ mod tests {
             rewritten["versions"]["1.0.0"]["dist"]["tarball"]
                 .as_str()
                 .unwrap()
-                .starts_with("http://localhost/npm/tarballs/pkg-1.0.0.tgz?u="),
+                == "http://localhost/npm/tarballs/pkg/-/pkg-1.0.0.tgz",
             true
         );
     }
@@ -294,11 +253,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            rewritten["dist"]["tarball"]
-                .as_str()
-                .unwrap()
-                .starts_with("http://localhost/npm/tarballs/pkg-1.0.0.tgz?u="),
-            true
+            rewritten["dist"]["tarball"].as_str().unwrap(),
+            "http://localhost/npm/tarballs/pkg/-/pkg-1.0.0.tgz"
         );
     }
 

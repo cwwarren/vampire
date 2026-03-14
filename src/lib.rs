@@ -7,4 +7,4 @@ pub mod stats;
 
 pub use app::App;
 pub use config::Config;
-pub use stats::{AppStats, StatsSnapshot};
+pub use stats::StatsSnapshot;

@@ -1,5 +1,4 @@
 use crate::config::Config;
-use crate::routes::CacheClass;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -12,18 +11,16 @@ use std::time::{Duration, SystemTime};
 use tokio::fs;
 use tokio::sync::{Mutex, Notify, OwnedSemaphorePermit, Semaphore};
 
-#[derive(Clone)]
 pub struct CacheStore {
-    root: Arc<PathBuf>,
+    root: PathBuf,
     max_cache_size: u64,
-    inflight: Arc<Mutex<HashMap<String, Arc<Inflight>>>>,
-    temp_counter: Arc<AtomicU64>,
+    inflight: Mutex<HashMap<String, Arc<Inflight>>>,
+    temp_counter: AtomicU64,
     upstream_semaphore: Arc<Semaphore>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StoredResponseMeta {
-    pub cache_class: CacheClass,
     pub headers: Vec<(String, String)>,
     pub last_modified: Option<String>,
     pub etag: Option<String>,
@@ -61,47 +58,38 @@ pub struct CachePaths {
 }
 
 pub struct Inflight {
-    state: Mutex<InflightState>,
+    outcome: Mutex<Option<InflightOutcome>>,
     notify: Notify,
-}
-
-struct InflightState {
-    outcome: Option<InflightOutcome>,
 }
 
 #[derive(Clone)]
 pub enum InflightOutcome {
     Cached,
     Response(StoredResponseMeta, Bytes),
+    Failed(String),
 }
 
 impl CacheStore {
     pub async fn new(config: &Config) -> io::Result<Self> {
         fs::create_dir_all(&config.cache_dir).await?;
         let store = Self {
-            root: Arc::new(config.cache_dir.clone()),
+            root: config.cache_dir.clone(),
             max_cache_size: config.max_cache_size,
-            inflight: Arc::new(Mutex::new(HashMap::new())),
-            temp_counter: Arc::new(AtomicU64::new(0)),
+            inflight: Mutex::new(HashMap::new()),
+            temp_counter: AtomicU64::new(0),
             upstream_semaphore: Arc::new(Semaphore::new(config.max_upstream_fetches)),
         };
-        store.cleanup_stale_temps(Duration::from_secs(300)).await?;
+        store.cleanup_stale_temps(Duration::from_mins(5)).await?;
         store.evict_to_bound().await?;
         Ok(store)
     }
 
-    pub fn key_for(cache_class: CacheClass, upstream: &str, accept_variant: &str) -> String {
-        let mut hasher = Sha256::new();
-        let class = match cache_class {
-            CacheClass::Artifact => "artifact",
-            CacheClass::Metadata => "metadata",
-        };
-        hasher.update(class.as_bytes());
-        hasher.update([0]);
-        hasher.update(upstream.as_bytes());
-        hasher.update([0]);
-        hasher.update(accept_variant.as_bytes());
-        hex::encode(hasher.finalize())
+    pub fn artifact_key(upstream: &str) -> String {
+        hash_key("artifact", upstream)
+    }
+
+    pub fn metadata_key(upstream: &str) -> String {
+        hash_key("metadata", upstream)
     }
 
     pub async fn load_artifact(&self, key: &str) -> io::Result<Option<StoredArtifact>> {
@@ -133,6 +121,12 @@ impl CacheStore {
     }
 
     pub async fn lookup_or_start_artifact(&self, key: String) -> io::Result<ArtifactLookup> {
+        {
+            let inflight_map = self.inflight.lock().await;
+            if let Some(existing) = inflight_map.get(&key) {
+                return Ok(ArtifactLookup::Join(existing.clone()));
+            }
+        }
         if let Some(entry) = self.load_artifact(&key).await? {
             return Ok(ArtifactLookup::Hit(entry));
         }
@@ -225,7 +219,7 @@ impl CacheStore {
 
     async fn cleanup_stale_temps(&self, max_age: Duration) -> io::Result<()> {
         let now = SystemTime::now();
-        let mut stack = vec![self.root.as_ref().clone()];
+        let mut stack = vec![self.root.clone()];
         while let Some(dir) = stack.pop() {
             let mut entries = match fs::read_dir(&dir).await {
                 Ok(entries) => entries,
@@ -273,7 +267,7 @@ impl CacheStore {
 
     async fn completed_entries(&self) -> io::Result<Vec<CompletedEntry>> {
         let mut out = Vec::new();
-        let mut stack = vec![self.root.as_ref().clone()];
+        let mut stack = vec![self.root.clone()];
         while let Some(dir) = stack.pop() {
             let mut entries = match fs::read_dir(&dir).await {
                 Ok(entries) => entries,
@@ -296,8 +290,7 @@ impl CacheStore {
                 let meta = path.with_file_name(format!("{stem}.json"));
                 let meta_size = fs::metadata(&meta)
                     .await
-                    .map(|item| item.len())
-                    .unwrap_or(0);
+                    .map_or(0, |item| item.len());
                 out.push(CompletedEntry {
                     body: path,
                     meta,
@@ -313,56 +306,35 @@ impl CacheStore {
 impl Inflight {
     pub(crate) fn new() -> Self {
         Self {
-            state: Mutex::new(InflightState { outcome: None }),
+            outcome: Mutex::new(None),
             notify: Notify::new(),
         }
     }
 
     pub async fn wait_for_outcome(&self) -> io::Result<InflightOutcome> {
         loop {
-            let state = self.state.lock().await;
-            if let Some(outcome) = &state.outcome {
+            let notified = self.notify.notified();
+            let state = self.outcome.lock().await;
+            if let Some(outcome) = state.as_ref() {
                 return Ok(outcome.clone());
             }
             drop(state);
-            self.notify.notified().await;
+            notified.await;
         }
     }
 
     pub async fn finish_cached(&self) {
-        let mut state = self.state.lock().await;
-        state.outcome = Some(InflightOutcome::Cached);
-        drop(state);
+        *self.outcome.lock().await = Some(InflightOutcome::Cached);
         self.notify.notify_waiters();
     }
 
     pub async fn finish_response(&self, meta: StoredResponseMeta, body: Bytes) {
-        let mut state = self.state.lock().await;
-        state.outcome = Some(InflightOutcome::Response(meta, body));
-        drop(state);
+        *self.outcome.lock().await = Some(InflightOutcome::Response(meta, body));
         self.notify.notify_waiters();
     }
 
     pub async fn fail(&self, error: String) {
-        let content_length = error.len().to_string();
-        let mut state = self.state.lock().await;
-        state.outcome = Some(InflightOutcome::Response(
-            StoredResponseMeta {
-                cache_class: CacheClass::Artifact,
-                headers: vec![
-                    ("content-length".to_owned(), content_length),
-                    (
-                        "content-type".to_owned(),
-                        "text/plain; charset=utf-8".to_owned(),
-                    ),
-                ],
-                last_modified: None,
-                etag: None,
-                status: 502,
-            },
-            Bytes::from(error),
-        ));
-        drop(state);
+        *self.outcome.lock().await = Some(InflightOutcome::Failed(error));
         self.notify.notify_waiters();
     }
 }
@@ -372,6 +344,15 @@ struct CompletedEntry {
     meta: PathBuf,
     modified: SystemTime,
     size: u64,
+}
+
+fn hash_key(class: &str, upstream: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(class.as_bytes());
+    hasher.update([0]);
+    hasher.update(upstream.as_bytes());
+    hasher.update([0]);
+    hex::encode(hasher.finalize())
 }
 
 fn pack_metadata(meta: &StoredResponseMeta, body: &[u8]) -> io::Result<Vec<u8>> {
@@ -412,7 +393,6 @@ fn unpack_metadata(bytes: &[u8]) -> io::Result<StoredMetadata> {
 mod tests {
     use super::{CacheStore, StoredResponseMeta, pack_metadata};
     use crate::config::Config;
-    use crate::routes::CacheClass;
     use bytes::Bytes;
     use std::path::PathBuf;
     use tempfile::tempdir;
@@ -430,9 +410,8 @@ mod tests {
             upstream_timeout: Duration::from_secs(5),
         };
         let store = CacheStore::new(&config).await.unwrap();
-        let key = CacheStore::key_for(CacheClass::Metadata, "https://registry.npmjs.org/pkg", "");
+        let key = CacheStore::metadata_key("https://registry.npmjs.org/pkg");
         let meta = StoredResponseMeta {
-            cache_class: CacheClass::Metadata,
             headers: vec![("content-length".to_owned(), "5".to_owned())],
             last_modified: Some("yesterday".to_owned()),
             etag: Some("\"v1\"".to_owned()),

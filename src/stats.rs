@@ -1,10 +1,9 @@
-use crate::routes::CacheClass;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
-#[derive(Clone, Default)]
+#[derive(Default)]
 pub struct AppStats {
-    inner: Arc<Mutex<StatsInner>>,
+    inner: Mutex<StatsSnapshot>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -14,21 +13,15 @@ pub struct StatsSnapshot {
     pub artifact_joins: HashMap<String, usize>,
 }
 
-#[derive(Default)]
-struct StatsInner {
-    artifact_fetches: HashMap<String, usize>,
-    metadata_fetches: HashMap<String, usize>,
-    artifact_joins: HashMap<String, usize>,
-}
-
 impl AppStats {
-    pub fn record_fetch(&self, cache_class: CacheClass, upstream: &str) {
+    pub fn record_artifact_fetch(&self, upstream: &str) {
         let mut inner = self.inner.lock().expect("stats mutex poisoned");
-        let map = match cache_class {
-            CacheClass::Artifact => &mut inner.artifact_fetches,
-            CacheClass::Metadata => &mut inner.metadata_fetches,
-        };
-        *map.entry(upstream.to_owned()).or_insert(0) += 1;
+        *inner.artifact_fetches.entry(upstream.to_owned()).or_insert(0) += 1;
+    }
+
+    pub fn record_metadata_fetch(&self, upstream: &str) {
+        let mut inner = self.inner.lock().expect("stats mutex poisoned");
+        *inner.metadata_fetches.entry(upstream.to_owned()).or_insert(0) += 1;
     }
 
     pub fn record_artifact_join(&self, upstream: &str) {
@@ -37,16 +30,10 @@ impl AppStats {
     }
 
     pub fn snapshot(&self) -> StatsSnapshot {
-        let inner = self.inner.lock().expect("stats mutex poisoned");
-        StatsSnapshot {
-            artifact_fetches: inner.artifact_fetches.clone(),
-            metadata_fetches: inner.metadata_fetches.clone(),
-            artifact_joins: inner.artifact_joins.clone(),
-        }
+        self.inner.lock().expect("stats mutex poisoned").clone()
     }
 
     pub fn reset(&self) {
-        let mut inner = self.inner.lock().expect("stats mutex poisoned");
-        *inner = StatsInner::default();
+        *self.inner.lock().expect("stats mutex poisoned") = StatsSnapshot::default();
     }
 }

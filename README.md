@@ -1,6 +1,6 @@
 # Vampire
 
-Vampire is a minimal Rust proxy for read-only PyPI, npm, and Cargo package installs.
+Vampire is a Rust proxy for read-only PyPI, npm, and Cargo package installs.
 
 It is built for controlled environments such as agent sandboxes, where package installs need to work without opening general outbound internet access. Vampire is intentionally narrow: it serves package-manager traffic, keeps artifacts on local disk, and bounds cache growth with `VAMPIRE_MAX_CACHE_SIZE_MB`. It is not a general web proxy, and it does not implement publish or auth APIs.
 

@@ -9,7 +9,7 @@ jobs:
   test:
     runs-on: procyon-vampire
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - name: Run standard test suite
         run: cargo test
@@ -17,7 +17,7 @@ jobs:
   real-e2e:
     runs-on: procyon-vampire
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - name: Run live end-to-end suite
         run: cargo test --test real_e2e -- --ignored --test-threads=1 --nocapture
@@ -34,7 +34,7 @@ jobs:
     env:
       IMAGE_NAME: ghcr.io/${{ github.repository }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Log in to GHCR
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
       - name: Build image

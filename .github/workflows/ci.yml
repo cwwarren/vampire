@@ -1,7 +1,6 @@
 name: ci
 
 on:
-  pull_request:
   push:
     branches:
       - main
@@ -42,7 +41,7 @@ jobs:
         run: >-
           docker build --pull
           --label org.opencontainers.image.title=vampire
-          --label org.opencontainers.image.description=Minimal\ Rust\ proxy\ for\ read-only\ PyPI,\ npm,\ and\ Cargo\ package\ installs
+          --label org.opencontainers.image.description=Rust\ proxy\ for\ read-only\ PyPI,\ npm,\ and\ Cargo\ package\ installs
           --label org.opencontainers.image.source=https://github.com/${{ github.repository }}
           --label org.opencontainers.image.revision=${{ github.sha }}
           -t ${IMAGE_NAME}:latest

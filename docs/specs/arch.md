@@ -8,7 +8,12 @@ Vampire is a single-process async Rust HTTP proxy that caches package artifacts 
 main.rs           Entrypoint: load config, bind listener, build App, serve
 lib.rs            Module declarations and public re-exports (App, Config, StatsSnapshot)
 
-app.rs            Axum router, request handlers, artifact fetch orchestration
+app.rs            Serve entrypoint and top-level router composition
+state.rs          App state, constructors, shared accessors
+proxy.rs          Shared request plumbing, response helpers, artifact fetch orchestration
+cargo.rs          Cargo routes and handlers
+pypi.rs           PyPI routes and handlers
+npm.rs            npm routes and handlers
 cache.rs          Disk cache, inflight dedup, eviction
 routes.rs         URL construction, origin validation, metadata rewriting (HTML/JSON)
 config.rs         Env var parsing (bind, cache_dir, max_cache_size_mb, etc.)
@@ -16,7 +21,7 @@ stats.rs          In-memory fetch counters (artifact/metadata/join)
 failure_log.rs    Structured JSON error logging to stderr
 ```
 
-No module has circular dependencies. `routes.rs`, `stats.rs`, `config.rs`, and `failure_log.rs` have no crate-internal imports. `cache.rs` imports only `config`. `app.rs` imports everything else.
+No module has circular dependencies. `routes.rs`, `stats.rs`, `config.rs`, and `failure_log.rs` have no crate-internal imports. `cache.rs` imports only `config`. `state.rs` owns shared state and constructors. `app.rs` depends on `state.rs` plus the registry and proxy modules to build the server router. `cargo.rs`, `pypi.rs`, and `npm.rs` depend on `state.rs`, `proxy.rs`, and `routes.rs`. `proxy.rs` owns the shared fetch/cache behavior and depends on `state.rs`, `cache.rs`, `routes.rs`, and `failure_log.rs`.
 
 ## Concurrency model
 

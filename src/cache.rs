@@ -288,9 +288,7 @@ impl CacheStore {
                     continue;
                 };
                 let meta = path.with_file_name(format!("{stem}.json"));
-                let meta_size = fs::metadata(&meta)
-                    .await
-                    .map_or(0, |item| item.len());
+                let meta_size = fs::metadata(&meta).await.map_or(0, |item| item.len());
                 out.push(CompletedEntry {
                     body: path,
                     meta,
@@ -403,7 +401,8 @@ mod tests {
     async fn metadata_round_trip_uses_one_file() {
         let temp = tempdir().unwrap();
         let config = Config {
-            bind: "127.0.0.1:0".parse().unwrap(),
+            pkg_bind: "127.0.0.1:0".parse().unwrap(),
+            git_bind: "127.0.0.1:0".parse().unwrap(),
             cache_dir: PathBuf::from(temp.path()),
             max_cache_size: 1024 * 1024,
             max_upstream_fetches: 4,

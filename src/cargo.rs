@@ -49,7 +49,7 @@ async fn cargo_index_get(
     OriginalUri(uri): OriginalUri,
 ) -> Response {
     let Some(upstream) = cargo_index_url(app.upstreams(), &path) else {
-        return crate::proxy::not_found().await;
+        return crate::proxy::not_found();
     };
     app.handle_metadata(upstream, MetadataRewrite::None)
         .await
@@ -62,7 +62,7 @@ async fn cargo_index_head(
     OriginalUri(uri): OriginalUri,
 ) -> Response {
     let Some(upstream) = cargo_index_url(app.upstreams(), &path) else {
-        return crate::proxy::not_found().await;
+        return crate::proxy::not_found();
     };
     app.handle_metadata_head(upstream)
         .await
@@ -75,7 +75,7 @@ async fn cargo_download_get(
     OriginalUri(uri): OriginalUri,
 ) -> Response {
     let Some(upstream) = cargo_download_url(app.upstreams(), &crate_name, &version) else {
-        return crate::proxy::not_found().await;
+        return crate::proxy::not_found();
     };
     app.handle_artifact(upstream)
         .await
@@ -88,7 +88,7 @@ async fn cargo_download_head(
     OriginalUri(uri): OriginalUri,
 ) -> Response {
     let Some(upstream) = cargo_download_url(app.upstreams(), &crate_name, &version) else {
-        return crate::proxy::not_found().await;
+        return crate::proxy::not_found();
     };
     app.handle_artifact_head(upstream)
         .await

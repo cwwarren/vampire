@@ -318,7 +318,7 @@ impl App {
     }
 }
 
-pub(crate) async fn not_found() -> Response {
+pub(crate) fn not_found() -> Response {
     simple_response(
         StatusCode::NOT_FOUND,
         "text/plain; charset=utf-8",
@@ -503,7 +503,8 @@ mod tests {
         let upstream = slow_upstream(started.clone()).await.unwrap();
         let temp = tempdir().unwrap();
         let config = Config {
-            bind: "127.0.0.1:0".parse().unwrap(),
+            pkg_bind: "127.0.0.1:0".parse().unwrap(),
+            git_bind: "127.0.0.1:0".parse().unwrap(),
             cache_dir: PathBuf::from(temp.path()),
             max_cache_size: 16 * 1024 * 1024,
             max_upstream_fetches: 4,
@@ -516,7 +517,7 @@ mod tests {
         let app = App::new_with_upstreams(config, client, RegistryOrigins::default())
             .await
             .unwrap();
-        let upstream_url = reqwest::Url::parse(&format!("http://{}/artifact", upstream)).unwrap();
+        let upstream_url = reqwest::Url::parse(&format!("http://{upstream}/artifact")).unwrap();
         let key = crate::cache::CacheStore::artifact_key(upstream_url.as_str());
         let leader = match app
             .cache()

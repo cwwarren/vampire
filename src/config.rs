@@ -5,7 +5,8 @@ use std::time::Duration;
 
 #[derive(Clone, Debug)]
 pub struct Config {
-    pub bind: SocketAddr,
+    pub pkg_bind: SocketAddr,
+    pub git_bind: SocketAddr,
     pub cache_dir: PathBuf,
     pub max_cache_size: u64,
     pub max_upstream_fetches: usize,
@@ -18,10 +19,14 @@ impl Config {
     }
 
     fn from_vars(var: impl Fn(&str) -> Option<String>) -> Result<Self, String> {
-        let bind = var("VAMPIRE_BIND")
+        let pkg_bind = var("VAMPIRE_PKG_BIND")
             .unwrap_or_else(|| "127.0.0.1:8080".to_owned())
             .parse()
-            .map_err(|error| format!("invalid VAMPIRE_BIND: {error}"))?;
+            .map_err(|error| format!("invalid VAMPIRE_PKG_BIND: {error}"))?;
+        let git_bind = var("VAMPIRE_GIT_BIND")
+            .unwrap_or_else(|| "127.0.0.1:8081".to_owned())
+            .parse()
+            .map_err(|error| format!("invalid VAMPIRE_GIT_BIND: {error}"))?;
         let cache_dir = var("VAMPIRE_CACHE_DIR")
             .map_or_else(|| PathBuf::from("./.cache/vampire"), PathBuf::from);
         let max_cache_size_mb: u64 = var("VAMPIRE_MAX_CACHE_SIZE_MB")
@@ -42,7 +47,8 @@ impl Config {
             .parse()
             .map_err(|error| format!("invalid VAMPIRE_UPSTREAM_TIMEOUT_MS: {error}"))?;
         Ok(Self {
-            bind,
+            pkg_bind,
+            git_bind,
             cache_dir,
             max_cache_size,
             max_upstream_fetches,
@@ -69,7 +75,8 @@ mod tests {
     #[test]
     fn defaults() {
         let config = config_with(&[]).unwrap();
-        assert_eq!(config.bind, "127.0.0.1:8080".parse().unwrap());
+        assert_eq!(config.pkg_bind, "127.0.0.1:8080".parse().unwrap());
+        assert_eq!(config.git_bind, "127.0.0.1:8081".parse().unwrap());
         assert_eq!(config.cache_dir.to_str().unwrap(), "./.cache/vampire");
         assert_eq!(config.max_cache_size, 100_000_000);
         assert_eq!(config.max_upstream_fetches, 32);
@@ -79,18 +86,20 @@ mod tests {
     #[test]
     fn overrides() {
         let config = config_with(&[
-            ("VAMPIRE_BIND", "0.0.0.0:9090"),
+            ("VAMPIRE_PKG_BIND", "0.0.0.0:9090"),
+            ("VAMPIRE_GIT_BIND", "0.0.0.0:9091"),
             ("VAMPIRE_CACHE_DIR", "/tmp/cache"),
             ("VAMPIRE_MAX_CACHE_SIZE_MB", "5000"),
             ("VAMPIRE_MAX_UPSTREAM_FETCHES", "8"),
             ("VAMPIRE_UPSTREAM_TIMEOUT_MS", "60000"),
         ])
         .unwrap();
-        assert_eq!(config.bind, "0.0.0.0:9090".parse().unwrap());
+        assert_eq!(config.pkg_bind, "0.0.0.0:9090".parse().unwrap());
+        assert_eq!(config.git_bind, "0.0.0.0:9091".parse().unwrap());
         assert_eq!(config.cache_dir.to_str().unwrap(), "/tmp/cache");
         assert_eq!(config.max_cache_size, 5_000_000_000);
         assert_eq!(config.max_upstream_fetches, 8);
-        assert_eq!(config.upstream_timeout, Duration::from_secs(60));
+        assert_eq!(config.upstream_timeout, Duration::from_mins(1));
     }
 
     #[test]
@@ -103,7 +112,8 @@ mod tests {
     #[test]
     fn rejects_invalid_values() {
         assert!(config_with(&[("VAMPIRE_MAX_CACHE_SIZE_MB", "abc")]).is_err());
-        assert!(config_with(&[("VAMPIRE_BIND", "not-an-addr")]).is_err());
+        assert!(config_with(&[("VAMPIRE_PKG_BIND", "not-an-addr")]).is_err());
+        assert!(config_with(&[("VAMPIRE_GIT_BIND", "still-not-an-addr")]).is_err());
         assert!(config_with(&[("VAMPIRE_UPSTREAM_TIMEOUT_MS", "xyz")]).is_err());
         assert!(config_with(&[("VAMPIRE_MAX_UPSTREAM_FETCHES", "-1")]).is_err());
     }

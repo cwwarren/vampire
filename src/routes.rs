@@ -7,6 +7,7 @@ use url::Url;
 pub struct RegistryOrigins {
     pub cargo_download: Url,
     pub cargo_index: Url,
+    pub github: Url,
     pub npm: Url,
     pub pypi_files: Url,
     pub pypi_simple: Url,
@@ -17,6 +18,7 @@ impl Default for RegistryOrigins {
         Self {
             cargo_download: Url::parse("https://static.crates.io/").unwrap(),
             cargo_index: Url::parse("https://index.crates.io/").unwrap(),
+            github: Url::parse("https://github.com/").unwrap(),
             npm: Url::parse("https://registry.npmjs.org/").unwrap(),
             pypi_files: Url::parse("https://files.pythonhosted.org/").unwrap(),
             pypi_simple: Url::parse("https://pypi.org/").unwrap(),
@@ -137,7 +139,10 @@ fn rewrite_pypi_href(href: &str, upstreams: &RegistryOrigins, origin: &str) -> S
                 .map(|fragment| format!("#{fragment}"))
                 .unwrap_or_default();
             let normalized = normalize_url(url, &upstreams.pypi_files);
-            let path = normalized.path().strip_prefix('/').unwrap_or(normalized.path());
+            let path = normalized
+                .path()
+                .strip_prefix('/')
+                .unwrap_or(normalized.path());
             return format!("{origin}/pypi/files/{path}{fragment}");
         }
         if (matches_origin(&url, &upstreams.pypi_simple) || url.host_str() == Some("pypi.org"))
@@ -159,7 +164,7 @@ fn rewrite_npm_tarball(input: &str, upstreams: &RegistryOrigins, origin: &str) -
     Some(format!("{origin}/npm/tarballs/{path}"))
 }
 
-fn join_url(base: &Url, path: &str) -> Option<Url> {
+pub(crate) fn join_url(base: &Url, path: &str) -> Option<Url> {
     if path.starts_with('/') || path.starts_with("//") || Url::parse(path).is_ok() {
         return None;
     }
@@ -167,7 +172,7 @@ fn join_url(base: &Url, path: &str) -> Option<Url> {
     matches_origin(&url, base).then_some(url)
 }
 
-fn matches_origin(url: &Url, base: &Url) -> bool {
+pub(crate) fn matches_origin(url: &Url, base: &Url) -> bool {
     url.scheme() == base.scheme()
         && url.host_str() == base.host_str()
         && url.port_or_known_default() == base.port_or_known_default()
@@ -202,6 +207,7 @@ mod tests {
         assert!(pypi_simple_url(&upstreams, Some("pkg/")).is_some());
         assert!(pypi_file_url("packages/pkg.whl", &upstreams).is_some());
         assert!(npm_tarball_url("pkg/-/pkg-1.0.0.tgz", &upstreams).is_some());
+        assert_eq!(upstreams.github.as_str(), "https://github.com/");
     }
 
     #[test]
@@ -230,12 +236,11 @@ mod tests {
             &rewrite_npm_json(&body, &upstreams, "http://localhost").unwrap(),
         )
         .unwrap();
-        assert_eq!(
+        assert!(
             rewritten["versions"]["1.0.0"]["dist"]["tarball"]
                 .as_str()
                 .unwrap()
-                == "http://localhost/npm/tarballs/pkg/-/pkg-1.0.0.tgz",
-            true
+                == "http://localhost/npm/tarballs/pkg/-/pkg-1.0.0.tgz"
         );
     }
 

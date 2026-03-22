@@ -30,7 +30,7 @@ async fn pypi_simple_root_get(
 ) -> Response {
     let origin = request_origin(&headers);
     let Some(upstream) = pypi_simple_url(app.upstreams(), None) else {
-        return crate::proxy::not_found().await;
+        return crate::proxy::not_found();
     };
     app.handle_metadata(upstream, MetadataRewrite::Pypi(origin))
         .await
@@ -39,7 +39,7 @@ async fn pypi_simple_root_get(
 
 async fn pypi_simple_root_head(State(app): State<App>, OriginalUri(uri): OriginalUri) -> Response {
     let Some(upstream) = pypi_simple_url(app.upstreams(), None) else {
-        return crate::proxy::not_found().await;
+        return crate::proxy::not_found();
     };
     app.handle_metadata_head(upstream)
         .await
@@ -54,7 +54,7 @@ async fn pypi_simple_project_get(
 ) -> Response {
     let origin = request_origin(&headers);
     let Some(upstream) = pypi_simple_url(app.upstreams(), Some(&project)) else {
-        return crate::proxy::not_found().await;
+        return crate::proxy::not_found();
     };
     app.handle_metadata(upstream, MetadataRewrite::Pypi(origin))
         .await
@@ -67,7 +67,7 @@ async fn pypi_simple_project_head(
     OriginalUri(uri): OriginalUri,
 ) -> Response {
     let Some(upstream) = pypi_simple_url(app.upstreams(), Some(&project)) else {
-        return crate::proxy::not_found().await;
+        return crate::proxy::not_found();
     };
     app.handle_metadata_head(upstream)
         .await
@@ -80,7 +80,7 @@ async fn pypi_file_get(
     OriginalUri(uri): OriginalUri,
 ) -> Response {
     let Some(upstream) = pypi_file_url(&path, app.upstreams()) else {
-        return crate::proxy::not_found().await;
+        return crate::proxy::not_found();
     };
     app.handle_artifact(upstream)
         .await
@@ -93,7 +93,7 @@ async fn pypi_file_head(
     OriginalUri(uri): OriginalUri,
 ) -> Response {
     let Some(upstream) = pypi_file_url(&path, app.upstreams()) else {
-        return crate::proxy::not_found().await;
+        return crate::proxy::not_found();
     };
     app.handle_artifact_head(upstream)
         .await

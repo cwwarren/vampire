@@ -9,14 +9,16 @@ VAMPIRE_MAX_CACHE_SIZE_MB=10000 cargo run
 ```bash
 docker run --rm \
   -p 8080:8080 \
-  -v vampire-cache:/var/lib/vampire \
+  -p 8081:8081 \
+  -v vampire-cache:/var/cache/vampire \
   -e VAMPIRE_MAX_CACHE_SIZE_MB=10000 \
   ghcr.io/cwwarren/vampire:latest
 ```
 
 Container defaults:
-- `VAMPIRE_BIND=0.0.0.0:8080`
-- `VAMPIRE_CACHE_DIR=/var/lib/vampire`
+- `VAMPIRE_PKG_BIND=0.0.0.0:8080`
+- `VAMPIRE_GIT_BIND=0.0.0.0:8081`
+- `VAMPIRE_CACHE_DIR=/var/cache/vampire`
 - Published tags are `latest` and `sha-<full git sha>`
 
 ## Client Configuration
@@ -35,6 +37,18 @@ replace-with = "vampire"
 
 [source.vampire]
 registry = "sparse+http://127.0.0.1:8080/cargo/index/"
+```
+
+Git-pinned dependencies (`pip install git+https://github.com/...`, `cargo { git = "..." }`, npm `git+https://` deps) need the git listener. Persist the URL rewrite in a temporary git config and export the env vars alongside PM-specific config:
+
+```bash
+tmpdir=$(mktemp -d)
+git config --file "$tmpdir/gitconfig" \
+  url.http://127.0.0.1:8081/.insteadOf \
+  https://github.com/
+export GIT_CONFIG_GLOBAL="$tmpdir/gitconfig"
+export GIT_CONFIG_NOSYSTEM=1
+export GIT_TERMINAL_PROMPT=0
 ```
 
 ## Sandbox Overrides
@@ -94,6 +108,8 @@ EOF
 Notes:
 - `pip` and `uv` need the `simple/` endpoint.
 - `npm` and `bun` need the `/npm/` endpoint.
+- Git-pinned dependencies use a separate listener on `VAMPIRE_GIT_BIND` (default `127.0.0.1:8081`). pip, uv, npm, and cargo all shell out to the system `git` binary, so `GIT_CONFIG_GLOBAL` with a `url.*.insteadOf` rewrite redirects their GitHub git traffic through vampire.
+- Git traffic is GitHub-only, read-only, uncached, and path-validated before forwarding. Responses stream through directly; `git-upload-pack` request bodies use the 8 MiB preforwarding cap.
 - If you run vampire over HTTPS with a trusted certificate, drop `PIP_TRUSTED_HOST` and `UV_INSECURE_HOST`.
 - `npm` has other useful env-only toggles for sandboxes because every documented config key can be set through `NPM_CONFIG_*`.
 

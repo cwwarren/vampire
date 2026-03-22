@@ -26,10 +26,10 @@ async fn npm_packument_get(
 ) -> Response {
     let origin = request_origin(&headers);
     let Some(package) = raw_path_tail(&uri, "/npm/") else {
-        return crate::proxy::not_found().await;
+        return crate::proxy::not_found();
     };
     let Some(upstream) = npm_packument_url(app.upstreams(), package) else {
-        return crate::proxy::not_found().await;
+        return crate::proxy::not_found();
     };
     app.handle_metadata(upstream, MetadataRewrite::Npm(origin))
         .await
@@ -38,10 +38,10 @@ async fn npm_packument_get(
 
 async fn npm_packument_head(State(app): State<App>, OriginalUri(uri): OriginalUri) -> Response {
     let Some(package) = raw_path_tail(&uri, "/npm/") else {
-        return crate::proxy::not_found().await;
+        return crate::proxy::not_found();
     };
     let Some(upstream) = npm_packument_url(app.upstreams(), package) else {
-        return crate::proxy::not_found().await;
+        return crate::proxy::not_found();
     };
     app.handle_metadata_head(upstream)
         .await
@@ -54,7 +54,7 @@ async fn npm_tarball_get(
     OriginalUri(uri): OriginalUri,
 ) -> Response {
     let Some(upstream) = npm_tarball_url(&path, app.upstreams()) else {
-        return crate::proxy::not_found().await;
+        return crate::proxy::not_found();
     };
     app.handle_artifact(upstream)
         .await
@@ -67,7 +67,7 @@ async fn npm_tarball_head(
     OriginalUri(uri): OriginalUri,
 ) -> Response {
     let Some(upstream) = npm_tarball_url(&path, app.upstreams()) else {
-        return crate::proxy::not_found().await;
+        return crate::proxy::not_found();
     };
     app.handle_artifact_head(upstream)
         .await

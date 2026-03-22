@@ -1,5 +1,6 @@
 mod app;
 mod cargo;
+mod git;
 mod npm;
 mod proxy;
 mod pypi;

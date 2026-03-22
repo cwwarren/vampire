@@ -1,16 +1,17 @@
 # Architecture
 
-Vampire is a single-process async Rust HTTP proxy that caches package artifacts and metadata for three registries: PyPI, npm, and Cargo. Built on tokio + axum + reqwest.
+Vampire is a single-process async Rust HTTP proxy that caches package artifacts and metadata for three registries: PyPI, npm, and Cargo. A second listener on the same process proxies read-only GitHub smart-HTTP traffic for git-pinned package dependencies. Built on tokio + axum + reqwest.
 
 ## Module structure
 
 ```
-main.rs           Entrypoint: load config, bind listener, build App, serve
+main.rs           Entrypoint: load config, bind listeners, build App, serve
 lib.rs            Module declarations and public re-exports (App, Config, StatsSnapshot)
 
 app.rs            Serve entrypoint and top-level router composition
 state.rs          App state, constructors, shared accessors
 proxy.rs          Shared request plumbing, response helpers, artifact fetch orchestration
+git.rs            Read-only GitHub smart-HTTP validation and forwarding
 cargo.rs          Cargo routes and handlers
 pypi.rs           PyPI routes and handlers
 npm.rs            npm routes and handlers
@@ -21,7 +22,7 @@ stats.rs          In-memory fetch counters (artifact/metadata/join)
 failure_log.rs    Structured JSON error logging to stderr
 ```
 
-No module has circular dependencies. `routes.rs`, `stats.rs`, `config.rs`, and `failure_log.rs` have no crate-internal imports. `cache.rs` imports only `config`. `state.rs` owns shared state and constructors. `app.rs` depends on `state.rs` plus the registry and proxy modules to build the server router. `cargo.rs`, `pypi.rs`, and `npm.rs` depend on `state.rs`, `proxy.rs`, and `routes.rs`. `proxy.rs` owns the shared fetch/cache behavior and depends on `state.rs`, `cache.rs`, `routes.rs`, and `failure_log.rs`.
+No module has circular dependencies. `routes.rs`, `stats.rs`, `config.rs`, and `failure_log.rs` have no crate-internal imports. `cache.rs` imports only `config`. `state.rs` owns shared state and constructors. `app.rs` depends on `state.rs` plus the registry and git modules to build the server router. `cargo.rs`, `pypi.rs`, `npm.rs`, and `git.rs` depend on `state.rs`; `cargo.rs`, `pypi.rs`, `npm.rs`, and `git.rs` also use shared response/failure behavior from `proxy.rs` where needed. `proxy.rs` owns the shared package fetch/cache behavior and depends on `state.rs`, `cache.rs`, `routes.rs`, and `failure_log.rs`.
 
 ## Concurrency model
 
@@ -34,7 +35,7 @@ AppInner {
     cache: CacheStore,          // disk cache + inflight map
     client: reqwest::Client,    // connection pool (internally Arc'd)
     stats: AppStats,            // Mutex<StatsInner> (std::sync, not tokio)
-    upstreams: RegistryOrigins, // 5 upstream base URLs
+    upstreams: RegistryOrigins, // 6 upstream base URLs
 }
 ```
 
@@ -54,7 +55,9 @@ Synchronization primitives within `CacheStore`:
 
 ### Routing
 
-All routes accept GET and HEAD. The axum router is built with `App` as state:
+`App::serve(pkg_listener, git_listener)` runs two Axum routers over the same shared `App` state.
+
+Package routes accept GET and HEAD on the package listener:
 
 | Path | Type | Handler |
 |---|---|---|
@@ -67,7 +70,16 @@ All routes accept GET and HEAD. The axum router is built with `App` as state:
 | `/npm/{*package}` | metadata | npm packument JSON |
 | `/npm/tarballs/{*path}` | artifact | npm tarballs |
 
+The git listener routes every request through the git handler. The git surface is path-based and GitHub-only:
+
+| Path | Type | Handler |
+|---|---|---|
+| `/{owner}/{repo}.git/info/refs?service=git-upload-pack` | git discovery | Forward to GitHub |
+| `/{owner}/{repo}.git/git-upload-pack` | git RPC | Forward to GitHub |
+
 Artifact routes for PyPI and npm encode the upstream path directly in the URL (e.g., `/pypi/files/packages/ab/cd/file.whl`). The proxy joins this path with the known upstream base URL. Path injection is prevented by `join_url`, which rejects absolute paths, `//` prefixes, and full URLs, then validates the resulting origin matches the base.
+
+Git traffic stays uncached and fail-closed. The handler parses the raw request URI, rejects absolute-form targets, URL-userinfo, `git-receive-pack`, doubled slashes, dot segments, encoded repo segments, encoded separators, malformed escapes, and other non-canonical path forms locally, then forwards only accepted `git-upload-pack` requests to `https://github.com`. Upload-pack request bodies are buffered up to 8 MiB before forwarding, while accepted upstream git responses are streamed directly back to the client.
 
 ### Metadata path
 
@@ -111,6 +123,19 @@ The background fetch (`run_artifact_fetch`):
 6. Remove key from inflight map
 
 On any error or task cancellation, the `ArtifactFetchCleanup` drop guard ensures the inflight is resolved (as a 502 error response) and the key is removed from the map, so joiners are never permanently blocked.
+
+### Git path
+
+Accepted git requests bypass the cache layer entirely.
+
+```
+git request
+  reject absolute-form, userinfo, CONNECT, invalid path, write RPCs
+  accept only GET info/refs?service=git-upload-pack
+           and POST git-upload-pack
+  forward only Git-Protocol (+ Content-Type on POST)
+  stream upstream response back without writing cache entries
+```
 
 ### HEAD path
 
@@ -240,7 +265,7 @@ No rewriting. Cargo discovers the download URL from `/cargo/index/config.json`, 
 ```
 
 Events:
-- `startup_failed` — config, bind, or app initialization error (with `stage` field; `bind_listener` stage also includes `bind` address)
+- `startup_failed` — config, bind, or app initialization error (with `stage` field; `bind_pkg_listener` and `bind_git_listener` stages include the `bind` address)
 - `request_failed` — any handler-level I/O error propagated to the route (with `method`, `path`, `query`, `error`)
 - `artifact_fetch_failed` — background fetch task error (with `stage`, `upstream`, `cache_key`, `error`)
 

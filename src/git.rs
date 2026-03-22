@@ -1,10 +1,10 @@
-use crate::proxy::request_failed_response;
+use crate::proxy::{is_hop_header, not_found, request_failed_response, simple_response};
 use crate::routes::{RegistryOrigins, join_url};
 use crate::state::App;
 use axum::body::{Body, to_bytes};
 use axum::extract::{OriginalUri, State};
-use axum::http::header::{CONTENT_LENGTH, CONTENT_TYPE};
-use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, Uri};
+use axum::http::header::CONTENT_TYPE;
+use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::response::Response;
 use bytes::Bytes;
 use std::io;
@@ -19,9 +19,9 @@ enum GithubGitRpc {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct GithubGitPath {
-    owner: String,
-    repo: String,
+struct GithubGitPath<'a> {
+    owner: &'a str,
+    repo: &'a str,
     rpc: GithubGitRpc,
 }
 
@@ -50,12 +50,13 @@ impl App {
         headers: &HeaderMap,
         body: Option<Bytes>,
     ) -> io::Result<Response> {
-        let mut request = self.client().request(method.clone(), upstream);
+        let mut forwarded_headers = HeaderMap::new();
         for (name, value) in headers {
             if is_allowlisted_git_request_header(&method, name.as_str()) {
-                request = request.header(name, value);
+                forwarded_headers.insert(name, value.clone());
             }
         }
+        let mut request = self.client().request(method, upstream).headers(forwarded_headers);
         if let Some(body) = body {
             request = request.body(body);
         }
@@ -65,25 +66,20 @@ impl App {
         let mut output = Response::new(Body::from_stream(response.bytes_stream()));
         *output.status_mut() = status;
         for (name, value) in &upstream_headers {
-            if is_hop_header(name.as_str()) {
-                continue;
+            if !is_hop_header(name.as_str()) {
+                output.headers_mut().insert(name, value.clone());
             }
-            output.headers_mut().insert(name, value.clone());
         }
         Ok(output)
     }
 }
 
-impl GithubGitPath {
-    fn new(owner: &str, repo: &str, rpc: GithubGitRpc) -> Option<Self> {
+impl<'a> GithubGitPath<'a> {
+    fn new(owner: &'a str, repo: &'a str, rpc: GithubGitRpc) -> Option<Self> {
         if !valid_repo_segment(owner) || !valid_repo_segment(repo) {
             return None;
         }
-        Some(Self {
-            owner: owner.to_owned(),
-            repo: repo.to_owned(),
-            rpc,
-        })
+        Some(Self { owner, repo, rpc })
     }
 
     fn upstream_url(&self, upstreams: &RegistryOrigins, query: Option<&str>) -> Option<Url> {
@@ -221,7 +217,7 @@ pub(crate) async fn request(
 ) -> Response {
     let request = match ParsedGitRequest::from_request(&method, &uri, app.upstreams()) {
         ParsedGitRequest::Forward(request) => request,
-        ParsedGitRequest::NotGit => return not_found_response(),
+        ParsedGitRequest::NotGit => return not_found(),
         ParsedGitRequest::Rejected(status, message) => return rejection(status, message),
     };
 
@@ -249,14 +245,6 @@ fn rejection(status: StatusCode, message: &'static str) -> Response {
     simple_response(status, "text/plain; charset=utf-8", message)
 }
 
-fn not_found_response() -> Response {
-    simple_response(
-        StatusCode::NOT_FOUND,
-        "text/plain; charset=utf-8",
-        "not found",
-    )
-}
-
 fn uri_contains_userinfo(uri: &Uri) -> bool {
     uri.authority()
         .is_some_and(|authority| authority.as_str().contains('@'))
@@ -273,7 +261,7 @@ fn is_allowlisted_git_request_header(method: &reqwest::Method, name: &str) -> bo
     }
 }
 
-fn parse_github_git_request_path(path: &str) -> Result<Option<GithubGitPath>, GitPathError> {
+fn parse_github_git_request_path(path: &str) -> Result<Option<GithubGitPath<'_>>, GitPathError> {
     if !path.starts_with('/') || path.contains('\\') {
         return Err(GitPathError::Invalid);
     }
@@ -312,11 +300,7 @@ fn parse_github_git_request_path(path: &str) -> Result<Option<GithubGitPath>, Gi
             };
             Ok(GithubGitPath::new(owner, repo, GithubGitRpc::UploadPack))
         }
-        [_, repo_segment, "git-receive-pack"]
-            if std::path::Path::new(repo_segment)
-                .extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("git")) =>
-        {
+        [_, repo_segment, "git-receive-pack"] if repo_segment.strip_suffix(".git").is_some() => {
             Err(GitPathError::ReceivePack)
         }
         _ => Ok(None),
@@ -349,39 +333,6 @@ fn valid_repo_segment(segment: &str) -> bool {
         && !segment.contains('/')
         && !segment.contains('\\')
         && !segment.contains('%')
-}
-
-fn is_hop_header(name: &str) -> bool {
-    [
-        "connection",
-        "keep-alive",
-        "proxy-authenticate",
-        "proxy-authorization",
-        "te",
-        "trailer",
-        "transfer-encoding",
-        "upgrade",
-    ]
-    .iter()
-    .any(|header| name.eq_ignore_ascii_case(header))
-}
-
-fn simple_response(
-    status: StatusCode,
-    content_type: &'static str,
-    body: impl Into<String>,
-) -> Response {
-    let body = body.into();
-    let len = body.len();
-    let mut response = Response::new(Body::from(body));
-    *response.status_mut() = status;
-    let headers = response.headers_mut();
-    headers.insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
-    headers.insert(
-        CONTENT_LENGTH,
-        HeaderValue::from_str(&len.to_string()).expect("content length"),
-    );
-    response
 }
 
 #[cfg(test)]

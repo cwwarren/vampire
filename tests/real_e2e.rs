@@ -244,10 +244,10 @@ test-pkgs = { git = "https://github.com/cwwarren/test-pkgs.git", tag = "v0.1.0" 
     .unwrap();
     fs::write(
         src_dir.join("main.rs"),
-        r#"fn main() {
+        r"fn main() {
     assert_eq!(test_pkgs::add(2, 3), 5);
 }
-"#,
+",
     )
     .await
     .unwrap();

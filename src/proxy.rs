@@ -318,6 +318,39 @@ impl App {
     }
 }
 
+pub(crate) fn simple_response(
+    status: StatusCode,
+    content_type: &'static str,
+    body: impl Into<String>,
+) -> Response {
+    let body = body.into();
+    let len = body.len();
+    let mut response = Response::new(Body::from(body));
+    *response.status_mut() = status;
+    let headers = response.headers_mut();
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
+    headers.insert(
+        CONTENT_LENGTH,
+        HeaderValue::from_str(&len.to_string()).expect("content length"),
+    );
+    response
+}
+
+pub(crate) fn is_hop_header(name: &str) -> bool {
+    [
+        "connection",
+        "keep-alive",
+        "proxy-authenticate",
+        "proxy-authorization",
+        "te",
+        "trailer",
+        "transfer-encoding",
+        "upgrade",
+    ]
+    .iter()
+    .any(|h| name.eq_ignore_ascii_case(h))
+}
+
 pub(crate) fn not_found() -> Response {
     simple_response(
         StatusCode::NOT_FOUND,
@@ -443,39 +476,6 @@ fn apply_headers(headers: &mut HeaderMap, pairs: &[(String, String)]) {
         };
         headers.insert(name, value);
     }
-}
-
-fn is_hop_header(name: &str) -> bool {
-    [
-        "connection",
-        "keep-alive",
-        "proxy-authenticate",
-        "proxy-authorization",
-        "te",
-        "trailer",
-        "transfer-encoding",
-        "upgrade",
-    ]
-    .iter()
-    .any(|h| name.eq_ignore_ascii_case(h))
-}
-
-fn simple_response(
-    status: StatusCode,
-    content_type: &'static str,
-    body: impl Into<String>,
-) -> Response {
-    let body = body.into();
-    let len = body.len();
-    let mut response = Response::new(Body::from(body));
-    *response.status_mut() = status;
-    let headers = response.headers_mut();
-    headers.insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
-    headers.insert(
-        CONTENT_LENGTH,
-        HeaderValue::from_str(&len.to_string()).expect("content length"),
-    );
-    response
 }
 
 #[cfg(test)]

@@ -98,6 +98,9 @@ replace-with = "vampire"
 
 [source.vampire]
 registry = "sparse+$VAMPIRE/cargo/index/"
+
+[net]
+git-fetch-with-cli = true
 EOF
 ```
 

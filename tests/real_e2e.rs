@@ -94,6 +94,7 @@ async fn github_git_real_e2e_clone_and_fetch_through_rewrite() {
     run_git_clone_and_fetch(&fixture.git_base_url, fixture.temp.path(), "git-flow")
         .await
         .unwrap();
+    assert_has_git_forwards(&fixture.app.stats().snapshot(), "git clone and fetch");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -149,6 +150,7 @@ async fn pip_git_pinned_dependency_through_proxy() {
     .await
     .unwrap();
     ensure_success("pip git dep validate", &validate).unwrap();
+    assert_has_git_forwards(&fixture.app.stats().snapshot(), "pip git dep");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -213,6 +215,7 @@ async fn npm_git_pinned_dependency_through_proxy() {
     .await
     .unwrap();
     ensure_success("npm git dep validate", &validate).unwrap();
+    assert_has_git_forwards(&fixture.app.stats().snapshot(), "npm git dep");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -254,7 +257,7 @@ test-pkgs = { git = "https://github.com/cwwarren/test-pkgs.git", tag = "v0.1.0" 
     fs::write(
         cargo_home.join("config.toml"),
         format!(
-            "[source.crates-io]\nreplace-with = \"vampire\"\n\n[source.vampire]\nregistry = \"sparse+{}/cargo/index/\"\n",
+            "[source.crates-io]\nreplace-with = \"vampire\"\n\n[source.vampire]\nregistry = \"sparse+{}/cargo/index/\"\n\n[net]\ngit-fetch-with-cli = true\n",
             fixture.pkg_base_url
         ),
     )
@@ -275,6 +278,7 @@ test-pkgs = { git = "https://github.com/cwwarren/test-pkgs.git", tag = "v0.1.0" 
         .await
         .unwrap();
     ensure_success("cargo run git dep", &run).unwrap();
+    assert_has_git_forwards(&fixture.app.stats().snapshot(), "cargo git dep");
 }
 
 struct RealFixture {
@@ -706,6 +710,13 @@ fn assert_no_artifact_fetches(snapshot: &StatsSnapshot, context: &str) {
         snapshot.artifact_fetches.is_empty(),
         "{context}: expected no artifact fetches, got {:?}",
         snapshot.artifact_fetches
+    );
+}
+
+fn assert_has_git_forwards(snapshot: &StatsSnapshot, context: &str) {
+    assert!(
+        !snapshot.git_forwards.is_empty(),
+        "{context}: expected git forwards, got none"
     );
 }
 

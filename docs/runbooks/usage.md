@@ -102,13 +102,16 @@ replace-with = "vampire"
 
 [source.vampire]
 registry = "sparse+$VAMPIRE/cargo/index/"
+
+[net]
+git-fetch-with-cli = true
 EOF
 ```
 
 Notes:
 - `pip` and `uv` need the `simple/` endpoint.
 - `npm` and `bun` need the `/npm/` endpoint.
-- Git-pinned dependencies use a separate listener on `VAMPIRE_GIT_BIND` (default `127.0.0.1:8081`). pip, uv, npm, and cargo all shell out to the system `git` binary, so `GIT_CONFIG_GLOBAL` with a `url.*.insteadOf` rewrite redirects their GitHub git traffic through vampire.
+- Git-pinned dependencies use a separate listener on `VAMPIRE_GIT_BIND` (default `127.0.0.1:8081`). pip, uv, npm, and cargo all shell out to the system `git` binary, so `GIT_CONFIG_GLOBAL` with a `url.*.insteadOf` rewrite redirects their GitHub git traffic through vampire. Cargo requires `net.git-fetch-with-cli = true` in its config to use the system git (it defaults to its own git implementation which does not respect `GIT_CONFIG_GLOBAL`).
 - Git traffic is GitHub-only, read-only, uncached, and path-validated before forwarding. Responses stream through directly; `git-upload-pack` request bodies use the 8 MiB preforwarding cap.
 - If you run vampire over HTTPS with a trusted certificate, drop `PIP_TRUSTED_HOST` and `UV_INSECURE_HOST`.
 - `npm` has other useful env-only toggles for sandboxes because every documented config key can be set through `NPM_CONFIG_*`.

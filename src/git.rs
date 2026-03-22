@@ -56,19 +56,22 @@ impl App {
                 forwarded_headers.insert(name, value.clone());
             }
         }
+        let upstream_str = upstream.as_str().to_owned();
         let mut request = self.client().request(method, upstream).headers(forwarded_headers);
         if let Some(body) = body {
             request = request.body(body);
         }
         let response = request.send().await.map_err(io::Error::other)?;
+        self.app_stats().record_git_forward(&upstream_str);
         let status = response.status();
         let upstream_headers = response.headers().clone();
         let mut output = Response::new(Body::from_stream(response.bytes_stream()));
         *output.status_mut() = status;
         for (name, value) in &upstream_headers {
-            if !is_hop_header(name.as_str()) {
-                output.headers_mut().insert(name, value.clone());
+            if is_hop_header(name.as_str()) || is_reqwest_decoded_header(name.as_str()) {
+                continue;
             }
+            output.headers_mut().insert(name, value.clone());
         }
         Ok(output)
     }
@@ -248,6 +251,11 @@ fn rejection(status: StatusCode, message: &'static str) -> Response {
 fn uri_contains_userinfo(uri: &Uri) -> bool {
     uri.authority()
         .is_some_and(|authority| authority.as_str().contains('@'))
+}
+
+fn is_reqwest_decoded_header(name: &str) -> bool {
+    name.eq_ignore_ascii_case("content-encoding")
+        || name.eq_ignore_ascii_case("content-length")
 }
 
 fn is_allowlisted_git_request_header(method: &reqwest::Method, name: &str) -> bool {

@@ -18,7 +18,7 @@ npm.rs            npm routes and handlers
 cache.rs          Disk cache, inflight dedup, eviction
 routes.rs         URL construction, origin validation, metadata rewriting (HTML/JSON)
 config.rs         Env var parsing (bind, cache_dir, max_cache_size_mb, etc.)
-stats.rs          In-memory fetch counters (artifact/metadata/join)
+stats.rs          In-memory fetch counters (artifact/metadata/join/git)
 failure_log.rs    Structured JSON error logging to stderr
 ```
 
@@ -271,9 +271,10 @@ Events:
 
 ## Stats
 
-`AppStats` tracks three counters, all keyed by upstream URL string:
+`AppStats` tracks four counters, all keyed by upstream URL string:
 - `artifact_fetches` — incremented per upstream artifact GET
 - `metadata_fetches` — incremented per upstream metadata GET (including revalidation)
 - `artifact_joins` — incremented when a request deduplicates against an in-progress fetch
+- `git_forwards` — incremented per forwarded git request to GitHub
 
 Exposed via `App::stats() -> &AppStats` with `snapshot()` and `reset()` methods. No HTTP endpoint — used by integration tests to verify dedup behavior.

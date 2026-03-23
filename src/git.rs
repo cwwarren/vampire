@@ -1,3 +1,4 @@
+use crate::failure_log::log_failure;
 use crate::proxy::{is_hop_header, not_found, request_failed_response, simple_response};
 use crate::routes::{RegistryOrigins, join_url};
 use crate::state::App;
@@ -68,10 +69,9 @@ impl App {
         let mut output = Response::new(Body::from_stream(response.bytes_stream()));
         *output.status_mut() = status;
         for (name, value) in &upstream_headers {
-            if is_hop_header(name.as_str()) || is_reqwest_decoded_header(name.as_str()) {
-                continue;
+            if !is_hop_header(name.as_str()) {
+                output.headers_mut().insert(name, value.clone());
             }
-            output.headers_mut().insert(name, value.clone());
         }
         Ok(output)
     }
@@ -221,13 +221,33 @@ pub(crate) async fn request(
     let request = match ParsedGitRequest::from_request(&method, &uri, app.upstreams()) {
         ParsedGitRequest::Forward(request) => request,
         ParsedGitRequest::NotGit => return not_found(),
-        ParsedGitRequest::Rejected(status, message) => return rejection(status, message),
+        ParsedGitRequest::Rejected(status, message) => {
+            log_failure(
+                "git_rejected",
+                serde_json::json!({
+                    "method": method.as_str(),
+                    "path": uri.path(),
+                    "query": uri.query(),
+                    "status": status.as_u16(),
+                    "message": message,
+                }),
+            );
+            return rejection(status, message);
+        }
     };
 
     let body = if request.reads_body() {
         match to_bytes(body, MAX_GIT_REQUEST_BODY_BYTES).await {
             Ok(body) => Some(body),
             Err(error) => {
+                log_failure(
+                    "git_body_read_failed",
+                    serde_json::json!({
+                        "method": method.as_str(),
+                        "path": uri.path(),
+                        "error": error.to_string(),
+                    }),
+                );
                 return simple_response(
                     StatusCode::BAD_REQUEST,
                     "text/plain; charset=utf-8",
@@ -253,16 +273,12 @@ fn uri_contains_userinfo(uri: &Uri) -> bool {
         .is_some_and(|authority| authority.as_str().contains('@'))
 }
 
-fn is_reqwest_decoded_header(name: &str) -> bool {
-    name.eq_ignore_ascii_case("content-encoding")
-        || name.eq_ignore_ascii_case("content-length")
-}
-
 fn is_allowlisted_git_request_header(method: &reqwest::Method, name: &str) -> bool {
     match *method {
         reqwest::Method::GET => name.eq_ignore_ascii_case("git-protocol"),
         reqwest::Method::POST => {
             name.eq_ignore_ascii_case(CONTENT_TYPE.as_str())
+                || name.eq_ignore_ascii_case("content-encoding")
                 || name.eq_ignore_ascii_case("git-protocol")
         }
         _ => false,

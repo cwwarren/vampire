@@ -64,5 +64,5 @@
 - Only smart-HTTP `git-upload-pack` discovery and RPC are supported.
 - Git routing is path-based, not header-based; `Git-Protocol` is forwarded when present but is not required for discovery.
 - Non-canonical or unsafe git paths such as doubled slashes, dot segments, encoded repo segments, encoded separators, malformed escapes, proxy-style absolute targets, URL-userinfo, and `git-receive-pack` are rejected locally.
-- For accepted git requests, vampire forwards only caller-supplied `Git-Protocol` and caller-supplied `Content-Type` on `git-upload-pack`.
+- For accepted git requests, vampire forwards only caller-supplied `Git-Protocol`, `Content-Type`, and `Content-Encoding` on `git-upload-pack`.
 - `git-upload-pack` request bodies remain buffered and capped at 8 MiB before forwarding.

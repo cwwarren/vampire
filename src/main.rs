@@ -16,14 +16,28 @@ async fn main() -> io::Result<()> {
             return Err(io::Error::other(error));
         }
     };
-    let listener = match TcpListener::bind(config.bind).await {
+    let pkg_listener = match TcpListener::bind(config.pkg_bind).await {
         Ok(listener) => listener,
         Err(error) => {
             log_failure(
                 "startup_failed",
                 json!({
-                    "stage": "bind_listener",
-                    "bind": config.bind.to_string(),
+                    "stage": "bind_pkg_listener",
+                    "bind": config.pkg_bind.to_string(),
+                    "error": error.to_string(),
+                }),
+            );
+            return Err(error);
+        }
+    };
+    let git_listener = match TcpListener::bind(config.git_bind).await {
+        Ok(listener) => listener,
+        Err(error) => {
+            log_failure(
+                "startup_failed",
+                json!({
+                    "stage": "bind_git_listener",
+                    "bind": config.git_bind.to_string(),
                     "error": error.to_string(),
                 }),
             );
@@ -40,5 +54,5 @@ async fn main() -> io::Result<()> {
             return Err(error);
         }
     };
-    app.serve(listener).await
+    app.serve(pkg_listener, git_listener).await
 }

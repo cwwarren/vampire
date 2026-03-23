@@ -1,7 +1,7 @@
 use axum::Router;
-use axum::body::Body;
+use axum::body::{Body, to_bytes};
 use axum::extract::State;
-use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, Uri};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri};
 use axum::response::Response;
 use axum::routing::any;
 use bytes::Bytes;
@@ -15,6 +15,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tempfile::TempDir;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 use tokio::time::{Duration, Instant};
@@ -26,7 +27,7 @@ async fn rejects_unknown_routes() {
     let fixture = TestFixture::new().await.unwrap();
     let response = fixture
         .client
-        .get(format!("{}/nope", fixture.base_url))
+        .get(format!("{}/nope", fixture.pkg_base_url))
         .send()
         .await
         .unwrap();
@@ -49,14 +50,14 @@ async fn rewrites_pypi_links() {
     let fixture = TestFixture::with_servers(upstream).await.unwrap();
     let response = fixture
         .client
-        .get(format!("{}/pypi/simple/pkg/", fixture.base_url))
+        .get(format!("{}/pypi/simple/pkg/", fixture.pkg_base_url))
         .send()
         .await
         .unwrap();
     let body = response.text().await.unwrap();
     assert!(body.contains(&format!(
         "{}/pypi/files/packages/pkg.whl#sha256=abc",
-        fixture.base_url
+        fixture.pkg_base_url
     )));
 }
 
@@ -72,7 +73,7 @@ async fn caches_artifacts_and_dedupes_misses() {
     let fixture = TestFixture::with_servers(upstream.clone()).await.unwrap();
     let url = format!(
         "{}/cargo/api/v1/crates/demo/1.0.0/download",
-        fixture.base_url
+        fixture.pkg_base_url
     );
     let responses = join_all((0..16).map(|_| fixture.client.get(&url).send())).await;
     for (index, response) in responses.into_iter().enumerate() {
@@ -120,7 +121,7 @@ async fn cold_artifact_waits_for_complete_fetch() {
     let fixture = TestFixture::with_servers(upstream.clone()).await.unwrap();
     let url = format!(
         "{}/cargo/api/v1/crates/slow/1.0.0/download",
-        fixture.base_url
+        fixture.pkg_base_url
     );
     let start = Instant::now();
     let response = fixture.client.get(&url).send().await.unwrap();
@@ -147,7 +148,7 @@ async fn revalidates_metadata() {
             "/pkg",
             UpstreamResponse::json(
                 200,
-                json!({
+                &json!({
                     "versions": {
                         "1.0.0": {
                             "dist": { "tarball": "https://registry.npmjs.org/pkg/-/pkg-1.0.0.tgz" }
@@ -159,7 +160,7 @@ async fn revalidates_metadata() {
         )
         .await;
     let fixture = TestFixture::with_servers(upstream.clone()).await.unwrap();
-    let url = format!("{}/npm/pkg", fixture.base_url);
+    let url = format!("{}/npm/pkg", fixture.pkg_base_url);
     let first = fixture.client.get(&url).send().await.unwrap();
     assert_eq!(first.status(), StatusCode::OK);
     upstream
@@ -181,7 +182,7 @@ async fn routes_scoped_npm_packuments_without_decoding_scope_separator() {
             "/@scope%2Fname",
             UpstreamResponse::json(
                 200,
-                json!({
+                &json!({
                     "name": "@scope/name",
                     "dist": {
                         "tarball": "https://registry.npmjs.org/@scope/name/-/name-1.0.0.tgz"
@@ -193,7 +194,7 @@ async fn routes_scoped_npm_packuments_without_decoding_scope_separator() {
     let fixture = TestFixture::with_servers(upstream.clone()).await.unwrap();
     let response = fixture
         .client
-        .get(format!("{}/npm/@scope%2Fname", fixture.base_url))
+        .get(format!("{}/npm/@scope%2Fname", fixture.pkg_base_url))
         .send()
         .await
         .unwrap();
@@ -205,7 +206,7 @@ async fn routes_scoped_npm_packuments_without_decoding_scope_separator() {
         body["dist"]["tarball"].as_str().unwrap(),
         format!(
             "{}/npm/tarballs/@scope/name/-/name-1.0.0.tgz",
-            fixture.base_url
+            fixture.pkg_base_url
         )
     );
 }
@@ -218,7 +219,7 @@ async fn cold_metadata_requests_run_in_parallel() {
             "/npm-a",
             UpstreamResponse::slow_json(
                 200,
-                json!({
+                &json!({
                     "versions": {
                         "1.0.0": {
                             "dist": { "tarball": "https://registry.npmjs.org/npm-a/-/npm-a-1.0.0.tgz" }
@@ -234,7 +235,7 @@ async fn cold_metadata_requests_run_in_parallel() {
             "/npm-b",
             UpstreamResponse::slow_json(
                 200,
-                json!({
+                &json!({
                     "versions": {
                         "1.0.0": {
                             "dist": { "tarball": "https://registry.npmjs.org/npm-b/-/npm-b-1.0.0.tgz" }
@@ -249,11 +250,11 @@ async fn cold_metadata_requests_run_in_parallel() {
     let start = Instant::now();
     let first = fixture
         .client
-        .get(format!("{}/npm/npm-a", fixture.base_url))
+        .get(format!("{}/npm/npm-a", fixture.pkg_base_url))
         .send();
     let second = fixture
         .client
-        .get(format!("{}/npm/npm-b", fixture.base_url))
+        .get(format!("{}/npm/npm-b", fixture.pkg_base_url))
         .send();
     let (first, second) = tokio::join!(first, second);
     assert_eq!(first.unwrap().status(), StatusCode::OK);
@@ -270,7 +271,7 @@ async fn serves_cargo_config() {
     let fixture = TestFixture::new().await.unwrap();
     let response = fixture
         .client
-        .get(format!("{}/cargo/index/config.json", fixture.base_url))
+        .get(format!("{}/cargo/index/config.json", fixture.pkg_base_url))
         .send()
         .await
         .unwrap();
@@ -278,9 +279,358 @@ async fn serves_cargo_config() {
     assert!(body.contains("/cargo/api/v1/crates"));
 }
 
+#[tokio::test]
+async fn git_readonly_forwards_smart_http_requests() {
+    let upstream = Upstream::new().await.unwrap();
+    upstream
+        .insert(
+            "/octocat/Hello-World.git/info/refs",
+            UpstreamResponse::text(
+                200,
+                "application/x-git-upload-pack-advertisement",
+                "001e# service=git-upload-pack\n0000",
+            ),
+        )
+        .await;
+    upstream
+        .insert(
+            "/octocat/Hello-World.git/git-upload-pack",
+            UpstreamResponse::bytes(
+                200,
+                "application/x-git-upload-pack-result",
+                b"PACK".to_vec(),
+            ),
+        )
+        .await;
+    let fixture = TestFixture::with_servers(upstream.clone()).await.unwrap();
+
+    let discovery = fixture
+        .client
+        .get(format!(
+            "{}/octocat/Hello-World.git/info/refs?service=git-upload-pack",
+            fixture.git_base_url
+        ))
+        .header("git-protocol", "version=2")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(discovery.status(), StatusCode::OK);
+
+    let upload_pack_request = b"0014want deadbeef\n0000".to_vec();
+    let upload = fixture
+        .client
+        .post(format!(
+            "{}/octocat/Hello-World.git/git-upload-pack",
+            fixture.git_base_url
+        ))
+        .header("content-type", "application/x-git-upload-pack-request")
+        .body(upload_pack_request.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(upload.status(), StatusCode::OK);
+    assert_eq!(upload.bytes().await.unwrap(), Bytes::from_static(b"PACK"));
+
+    let requests = upstream.recorded_requests().await;
+    let discovery_request = requests
+        .iter()
+        .find(|request| request.path == "/octocat/Hello-World.git/info/refs")
+        .unwrap();
+    assert_eq!(discovery_request.method, "GET");
+    assert_eq!(
+        discovery_request.query.as_deref(),
+        Some("service=git-upload-pack")
+    );
+    assert_eq!(
+        discovery_request.header("git-protocol").as_deref(),
+        Some("version=2")
+    );
+
+    let upload_request = requests
+        .iter()
+        .find(|request| request.path == "/octocat/Hello-World.git/git-upload-pack")
+        .unwrap();
+    assert_eq!(upload_request.method, "POST");
+    assert_eq!(upload_request.query, None);
+    assert_eq!(
+        upload_request.header("content-type").as_deref(),
+        Some("application/x-git-upload-pack-request")
+    );
+    assert_eq!(upload_request.body, upload_pack_request);
+}
+
+#[tokio::test]
+async fn git_upload_pack_streams_upstream_response() {
+    let upstream = Upstream::new().await.unwrap();
+    upstream
+        .insert(
+            "/octocat/Hello-World.git/git-upload-pack",
+            UpstreamResponse::slow_bytes(
+                200,
+                "application/x-git-upload-pack-result",
+                b"PACK".to_vec(),
+                b"DATA".to_vec(),
+                Duration::from_millis(250),
+            ),
+        )
+        .await;
+    let fixture = TestFixture::with_servers(upstream).await.unwrap();
+
+    let start = Instant::now();
+    let mut response = fixture
+        .client
+        .post(format!(
+            "{}/octocat/Hello-World.git/git-upload-pack",
+            fixture.git_base_url
+        ))
+        .header("content-type", "application/x-git-upload-pack-request")
+        .body(b"0014want deadbeef\n0000".to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let first = response.chunk().await.unwrap().unwrap();
+    assert_eq!(first, Bytes::from_static(b"PACK"));
+    assert!(
+        start.elapsed() < Duration::from_millis(200),
+        "proxy buffered the full upstream git response before yielding the first chunk: {:?}",
+        start.elapsed()
+    );
+
+    let second = response.chunk().await.unwrap().unwrap();
+    assert_eq!(second, Bytes::from_static(b"DATA"));
+    assert!(
+        start.elapsed() >= Duration::from_millis(200),
+        "proxy returned the second chunk before the upstream pause elapsed: {:?}",
+        start.elapsed()
+    );
+    assert!(response.chunk().await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn git_repeated_reads_reforward_upstream() {
+    let upstream = Upstream::new().await.unwrap();
+    upstream
+        .insert(
+            "/octocat/Hello-World.git/info/refs",
+            UpstreamResponse::text(
+                200,
+                "application/x-git-upload-pack-advertisement",
+                "001e# service=git-upload-pack\n0000",
+            ),
+        )
+        .await;
+    upstream
+        .insert(
+            "/octocat/Hello-World.git/info/refs",
+            UpstreamResponse::text(
+                200,
+                "application/x-git-upload-pack-advertisement",
+                "001e# service=git-upload-pack\n0000",
+            ),
+        )
+        .await;
+    let fixture = TestFixture::with_servers(upstream.clone()).await.unwrap();
+
+    for _ in 0..2 {
+        let response = fixture
+            .client
+            .get(format!(
+                "{}/octocat/Hello-World.git/info/refs?service=git-upload-pack",
+                fixture.git_base_url
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    assert_eq!(
+        upstream
+            .request_count("/octocat/Hello-World.git/info/refs")
+            .await,
+        2
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn git_guardrails_drop_headers_and_reject_invalid_paths() {
+    let upstream = Upstream::new().await.unwrap();
+    upstream
+        .insert(
+            "/octocat/Hello-World.git/info/refs",
+            UpstreamResponse::text(
+                200,
+                "application/x-git-upload-pack-advertisement",
+                "001e# service=git-upload-pack\n0000",
+            ),
+        )
+        .await;
+    upstream
+        .insert(
+            "/octocat/Hello-World.git/git-upload-pack",
+            UpstreamResponse::bytes(
+                200,
+                "application/x-git-upload-pack-result",
+                b"PACK".to_vec(),
+            ),
+        )
+        .await;
+    let fixture = TestFixture::with_servers(upstream.clone()).await.unwrap();
+
+    let discovery = fixture
+        .client
+        .get(format!(
+            "{}/octocat/Hello-World.git/info/refs?service=git-upload-pack",
+            fixture.git_base_url
+        ))
+        .header("authorization", "Basic Zm9vOmJhcg==")
+        .header("proxy-authorization", "Basic Zm9vOmJhcg==")
+        .header("cookie", "session=abc")
+        .header("forwarded", "host=evil.example;proto=https")
+        .header("x-forwarded-host", "evil.example")
+        .header("x-forwarded-proto", "https")
+        .header("host", "github.com")
+        .header("git-protocol", "version=2")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(discovery.status(), StatusCode::OK);
+
+    let upload = fixture
+        .client
+        .post(format!(
+            "{}/octocat/Hello-World.git/git-upload-pack",
+            fixture.git_base_url
+        ))
+        .header("authorization", "Basic Zm9vOmJhcg==")
+        .header("forwarded", "host=evil.example;proto=https")
+        .header("git-protocol", "version=2")
+        .header("content-type", "application/x-git-upload-pack-request")
+        .body(b"0014want deadbeef\n0000".to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(upload.status(), StatusCode::OK);
+
+    let info_missing_query = fixture
+        .client
+        .get(format!(
+            "{}/octocat/Hello-World.git/info/refs",
+            fixture.git_base_url
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(info_missing_query.status(), StatusCode::BAD_REQUEST);
+
+    let receive_pack = fixture
+        .client
+        .post(format!(
+            "{}/octocat/Hello-World.git/git-receive-pack",
+            fixture.git_base_url
+        ))
+        .body(Vec::from("PACK"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(receive_pack.status(), StatusCode::METHOD_NOT_ALLOWED);
+
+    let encoded_repo = raw_http_request(
+        fixture.git_bind,
+        &format!(
+            "GET /octocat/%48ello-World.git/info/refs?service=git-upload-pack HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+            fixture.git_bind
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(encoded_repo.status, StatusCode::BAD_REQUEST);
+    assert!(encoded_repo.body.contains("invalid git path"));
+
+    let absolute_form = raw_http_request(
+        fixture.git_bind,
+        &format!(
+            "GET http://evil.example/octocat/Hello-World.git/info/refs?service=git-upload-pack HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+            fixture.git_bind
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(absolute_form.status, StatusCode::BAD_REQUEST);
+    assert!(absolute_form.body.contains("absolute-form"));
+
+    let requests = upstream.recorded_requests().await;
+    let discovery_request = requests
+        .iter()
+        .find(|request| request.path == "/octocat/Hello-World.git/info/refs")
+        .unwrap();
+    assert_eq!(
+        discovery_request.header("git-protocol").as_deref(),
+        Some("version=2")
+    );
+    for header in [
+        "authorization",
+        "proxy-authorization",
+        "cookie",
+        "forwarded",
+        "x-forwarded-host",
+        "x-forwarded-proto",
+    ] {
+        assert_eq!(
+            discovery_request.header(header),
+            None,
+            "unexpected {header}"
+        );
+    }
+
+    let upload_request = requests
+        .iter()
+        .find(|request| request.path == "/octocat/Hello-World.git/git-upload-pack")
+        .unwrap();
+    assert_eq!(
+        upload_request.header("content-type").as_deref(),
+        Some("application/x-git-upload-pack-request")
+    );
+    assert_eq!(
+        upload_request.header("git-protocol").as_deref(),
+        Some("version=2")
+    );
+    assert_eq!(upload_request.header("authorization"), None);
+    assert_eq!(upload_request.header("forwarded"), None);
+}
+
+#[tokio::test]
+async fn package_and_git_ports_are_isolated() {
+    let fixture = TestFixture::new().await.unwrap();
+
+    let git_on_package_port = fixture
+        .client
+        .get(format!(
+            "{}/octocat/Hello-World.git/info/refs?service=git-upload-pack",
+            fixture.pkg_base_url
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(git_on_package_port.status(), StatusCode::NOT_FOUND);
+
+    let package_on_git_port = fixture
+        .client
+        .get(format!("{}/cargo/index/config.json", fixture.git_base_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(package_on_git_port.status(), StatusCode::NOT_FOUND);
+}
+
 struct TestFixture {
     _temp_dir: TempDir,
-    base_url: String,
+    git_bind: SocketAddr,
+    pkg_base_url: String,
+    git_base_url: String,
     client: Client,
 }
 
@@ -291,9 +641,11 @@ impl TestFixture {
 
     async fn with_servers(upstream: Upstream) -> io::Result<Self> {
         let temp_dir = tempfile::tempdir()?;
-        let bind = listen_addr().await?;
+        let pkg_bind = listen_addr().await?;
+        let git_bind = listen_addr().await?;
         let config = Config {
-            bind,
+            pkg_bind,
+            git_bind,
             cache_dir: PathBuf::from(temp_dir.path()),
             max_cache_size: 32 * 1024 * 1024,
             max_upstream_fetches: 8,
@@ -302,6 +654,7 @@ impl TestFixture {
         let client = Client::builder()
             .resolve("pypi.org", upstream.addr)
             .resolve("files.pythonhosted.org", upstream.addr)
+            .resolve("github.com", upstream.addr)
             .resolve("registry.npmjs.org", upstream.addr)
             .resolve("index.crates.io", upstream.addr)
             .resolve("static.crates.io", upstream.addr)
@@ -310,18 +663,22 @@ impl TestFixture {
         let upstreams = RegistryOrigins {
             cargo_download: reqwest::Url::parse(&format!("http://{}/", upstream.addr)).unwrap(),
             cargo_index: reqwest::Url::parse(&format!("http://{}/", upstream.addr)).unwrap(),
+            github: reqwest::Url::parse(&format!("http://{}/", upstream.addr)).unwrap(),
             npm: reqwest::Url::parse(&format!("http://{}/", upstream.addr)).unwrap(),
             pypi_files: reqwest::Url::parse(&format!("http://{}/", upstream.addr)).unwrap(),
             pypi_simple: reqwest::Url::parse(&format!("http://{}/", upstream.addr)).unwrap(),
         };
         let app = App::new_with_upstreams(config.clone(), client.clone(), upstreams).await?;
-        let listener = TcpListener::bind(bind).await?;
+        let pkg_listener = TcpListener::bind(pkg_bind).await?;
+        let git_listener = TcpListener::bind(git_bind).await?;
         tokio::spawn(async move {
-            let _ = app.serve(listener).await;
+            let _ = app.serve(pkg_listener, git_listener).await;
         });
         Ok(Self {
             _temp_dir: temp_dir,
-            base_url: format!("http://{}", config.bind),
+            git_bind: config.git_bind,
+            pkg_base_url: format!("http://{}", config.pkg_bind),
+            git_base_url: format!("http://{}", config.git_bind),
             client,
         })
     }
@@ -332,6 +689,7 @@ struct Upstream {
     addr: SocketAddr,
     routes: Arc<Mutex<HashMap<String, Vec<UpstreamResponse>>>>,
     counts: Arc<Mutex<HashMap<String, Arc<AtomicUsize>>>>,
+    requests: Arc<Mutex<Vec<RecordedRequest>>>,
 }
 
 impl Upstream {
@@ -342,6 +700,7 @@ impl Upstream {
             addr,
             routes: Arc::new(Mutex::new(HashMap::new())),
             counts: Arc::new(Mutex::new(HashMap::new())),
+            requests: Arc::new(Mutex::new(Vec::new())),
         };
         let router = Router::new()
             .fallback(any(upstream_handle))
@@ -371,20 +730,44 @@ impl Upstream {
             .lock()
             .await
             .get(path)
-            .map(|value| value.load(Ordering::SeqCst))
-            .unwrap_or(0)
+            .map_or(0, |value| value.load(Ordering::SeqCst))
+    }
+
+    async fn recorded_requests(&self) -> Vec<RecordedRequest> {
+        self.requests.lock().await.clone()
     }
 }
 
 async fn upstream_handle(
     State(upstream): State<Upstream>,
+    method: Method,
     uri: Uri,
     headers: HeaderMap,
+    body: Body,
 ) -> Response {
+    let body = match to_bytes(body, 8 * 1024 * 1024).await {
+        Ok(body) => body,
+        Err(error) => return text_response(500, &error.to_string()),
+    };
     let path = uri.path().to_owned();
     if let Some(counter) = upstream.counts.lock().await.get(&path).cloned() {
         counter.fetch_add(1, Ordering::SeqCst);
     }
+    upstream.requests.lock().await.push(RecordedRequest {
+        method: method.to_string(),
+        path: path.clone(),
+        query: uri.query().map(str::to_owned),
+        headers: headers
+            .iter()
+            .filter_map(|(name, value)| {
+                value
+                    .to_str()
+                    .ok()
+                    .map(|value| (name.as_str().to_owned(), value.to_owned()))
+            })
+            .collect(),
+        body: body.to_vec(),
+    });
     let mut routes = upstream.routes.lock().await;
     let Some(queue) = routes.get_mut(&path) else {
         return text_response(404, "missing");
@@ -405,6 +788,24 @@ async fn upstream_handle(
         }
     }
     response.into_response()
+}
+
+#[derive(Clone, Debug)]
+struct RecordedRequest {
+    method: String,
+    path: String,
+    query: Option<String>,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+}
+
+impl RecordedRequest {
+    fn header(&self, name: &str) -> Option<String> {
+        self.headers
+            .iter()
+            .find(|(header, _)| header.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.clone())
+    }
 }
 
 #[derive(Clone)]
@@ -442,11 +843,11 @@ impl UpstreamResponse {
         Self::bytes(status, content_type, body.as_bytes().to_vec())
     }
 
-    fn json(status: u16, body: serde_json::Value) -> Self {
+    fn json(status: u16, body: &serde_json::Value) -> Self {
         Self::bytes(
             status,
             "application/json",
-            serde_json::to_vec(&body).unwrap(),
+            serde_json::to_vec(body).unwrap(),
         )
     }
 
@@ -484,8 +885,8 @@ impl UpstreamResponse {
         }
     }
 
-    fn slow_json(status: u16, body: serde_json::Value, pause: Duration) -> Self {
-        let bytes = serde_json::to_vec(&body).unwrap();
+    fn slow_json(status: u16, body: &serde_json::Value, pause: Duration) -> Self {
+        let bytes = serde_json::to_vec(body).unwrap();
         let midpoint = bytes.len() / 2;
         Self::slow_bytes(
             status,
@@ -534,8 +935,43 @@ impl UpstreamResponse {
     }
 }
 
+#[derive(Debug)]
+struct RawHttpResponse {
+    status: StatusCode,
+    body: String,
+}
+
+async fn raw_http_request(addr: SocketAddr, request: &str) -> io::Result<RawHttpResponse> {
+    let mut stream = tokio::net::TcpStream::connect(addr).await?;
+    stream.write_all(request.as_bytes()).await?;
+    let mut bytes = Vec::new();
+    stream.read_to_end(&mut bytes).await?;
+    parse_raw_http_response(&bytes)
+}
+
+fn parse_raw_http_response(bytes: &[u8]) -> io::Result<RawHttpResponse> {
+    let text = String::from_utf8_lossy(bytes);
+    let (head, body) = text
+        .split_once("\r\n\r\n")
+        .ok_or_else(|| io::Error::other(format!("invalid raw response: {text}")))?;
+    let status_line = head
+        .lines()
+        .next()
+        .ok_or_else(|| io::Error::other("missing status line"))?;
+    let status = status_line
+        .split_whitespace()
+        .nth(1)
+        .ok_or_else(|| io::Error::other(format!("missing status code in {status_line:?}")))?
+        .parse::<u16>()
+        .map_err(|error| io::Error::other(format!("invalid status code: {error}")))?;
+    Ok(RawHttpResponse {
+        status: StatusCode::from_u16(status).map_err(io::Error::other)?,
+        body: body.to_owned(),
+    })
+}
+
 async fn listen_addr() -> io::Result<SocketAddr> {
-    Ok(TcpListener::bind("127.0.0.1:0").await?.local_addr()?)
+    TcpListener::bind("127.0.0.1:0").await?.local_addr()
 }
 
 fn text_response(status: u16, body: &str) -> Response {

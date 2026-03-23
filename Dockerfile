@@ -6,14 +6,16 @@ COPY src ./src
 RUN cargo build --locked --release --bin vampire
 
 FROM alpine:3
-RUN adduser -D -h /var/lib/vampire -s /sbin/nologin vampire \
-    && mkdir -p /var/lib/vampire \
-    && chown vampire:vampire /var/lib/vampire
+RUN adduser -D -h /nonexistent -H -s /sbin/nologin vampire \
+    && mkdir -p /var/cache/vampire \
+    && chown vampire:vampire /var/cache/vampire
 COPY --from=builder /work/target/release/vampire /usr/local/bin/vampire
 USER vampire
-ENV VAMPIRE_BIND=0.0.0.0:8080
-ENV VAMPIRE_CACHE_DIR=/var/lib/vampire
-WORKDIR /var/lib/vampire
+ENV VAMPIRE_PKG_BIND=0.0.0.0:8080
+ENV VAMPIRE_GIT_BIND=0.0.0.0:8081
+ENV VAMPIRE_CACHE_DIR=/var/cache/vampire
+WORKDIR /var/cache/vampire
 EXPOSE 8080
-VOLUME ["/var/lib/vampire"]
+EXPOSE 8081
+VOLUME ["/var/cache/vampire"]
 ENTRYPOINT ["/usr/local/bin/vampire"]

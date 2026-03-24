@@ -54,6 +54,7 @@
 - Metadata is cached only when upstream returns `ETag` or `Last-Modified`.
 - Metadata fetches are not deduped. Concurrent cold metadata requests may fetch upstream independently and race to populate cache.
 - Cached metadata is published as a single atomic file so readers never observe mixed headers and body bytes.
+- Rewritten npm and PyPI metadata must not expose upstream `ETag` or `Last-Modified` to clients; those validators are only for vampire's own upstream revalidation.
 - Eviction is oldest-first by completed file mtime.
 - Successful writes may overshoot temporarily; janitor eviction restores the bound after commit.
 

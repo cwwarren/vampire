@@ -163,6 +163,8 @@ async fn revalidates_metadata() {
     let url = format!("{}/npm/pkg", fixture.pkg_base_url);
     let first = fixture.client.get(&url).send().await.unwrap();
     assert_eq!(first.status(), StatusCode::OK);
+    assert!(first.headers().get("etag").is_none());
+    assert!(first.headers().get("last-modified").is_none());
     upstream
         .insert(
             "/pkg",
@@ -171,7 +173,62 @@ async fn revalidates_metadata() {
         .await;
     let second = fixture.client.get(&url).send().await.unwrap();
     assert_eq!(second.status(), StatusCode::OK);
+    assert!(second.headers().get("etag").is_none());
+    assert!(second.headers().get("last-modified").is_none());
     assert_eq!(upstream.request_count("/pkg").await, 2);
+}
+
+#[tokio::test]
+async fn pypi_rewritten_metadata_hides_upstream_validators() {
+    let upstream = Upstream::new().await.unwrap();
+    upstream
+        .insert(
+            "/simple/pkg/",
+            UpstreamResponse::text(
+                200,
+                "text/html",
+                r#"<a href="https://files.pythonhosted.org/packages/pkg.whl#sha256=abc">pkg</a>"#,
+            )
+            .with_header("etag", "\"v1\"")
+            .with_header("last-modified", "Wed, 21 Oct 2015 07:28:00 GMT"),
+        )
+        .await;
+    let fixture = TestFixture::with_servers(upstream).await.unwrap();
+    let response = fixture
+        .client
+        .get(format!("{}/pypi/simple/pkg/", fixture.pkg_base_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(response.headers().get("etag").is_none());
+    assert!(response.headers().get("last-modified").is_none());
+}
+
+#[tokio::test]
+async fn cargo_metadata_preserves_upstream_validators() {
+    let upstream = Upstream::new().await.unwrap();
+    upstream
+        .insert(
+            "/se/rd/serde",
+            UpstreamResponse::json(200, &json!({"name": "serde"}))
+                .with_header("etag", "\"cargo-v1\"")
+                .with_header("last-modified", "Wed, 21 Oct 2015 07:28:00 GMT"),
+        )
+        .await;
+    let fixture = TestFixture::with_servers(upstream).await.unwrap();
+    let response = fixture
+        .client
+        .get(format!("{}/cargo/index/se/rd/serde", fixture.pkg_base_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers().get("etag").unwrap(), "\"cargo-v1\"");
+    assert_eq!(
+        response.headers().get("last-modified").unwrap(),
+        "Wed, 21 Oct 2015 07:28:00 GMT"
+    );
 }
 
 #[tokio::test]

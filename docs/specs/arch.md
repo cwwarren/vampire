@@ -100,6 +100,7 @@ handle_metadata(upstream, rewrite)
 ```
 
 Metadata is only cached when the upstream provides a cache validator (etag or last-modified). Metadata fetches are NOT gated by the upstream semaphore.
+For rewritten npm and PyPI metadata, vampire still stores those upstream validators for its own conditional GETs, but strips `ETag` and `Last-Modified` from the client-facing response headers because the served bytes differ from the upstream representation.
 
 ### Artifact path
 
@@ -179,6 +180,8 @@ Written in two steps: `fs::write` the `.json`, then `fs::rename` the `.part` to 
 [remaining bytes: response body]
 ```
 
+For metadata entries, `StoredResponseMeta` carries both the headers returned to clients and the upstream validator fields vampire uses for conditional revalidation.
+
 Written atomically: pack into memory, write to a uniquely-suffixed `.part` temp file, then `fs::rename` to `.body`.
 
 ## Inflight dedup
@@ -246,15 +249,19 @@ Regex-matches all `href="..."` and `href='...'` attributes. For each:
 - URLs matching the configured `pypi_simple` origin or hostname `pypi.org`, with path starting `/simple/` → `{VAMPIRE_PUBLIC_BASE_URL}{path}` (strips host, keeps path)
 - Other URLs → unchanged
 
+Rewritten PyPI responses do not forward upstream `ETag` or `Last-Modified` headers to clients.
+
 ### npm (JSON)
 
 Parses the full packument as `serde_json::Value`. Rewrites `dist.tarball` on the root object and on every entry in `versions.*`:
 - URLs matching the configured `npm` origin or hostname `registry.npmjs.org` → `{VAMPIRE_PUBLIC_BASE_URL}/npm/tarballs/{relative_path}`
 - Other URLs → unchanged
 
+Rewritten npm responses do not forward upstream `ETag` or `Last-Modified` headers to clients.
+
 ### Cargo
 
-No rewriting. Cargo discovers the download URL from `/cargo/index/config.json`, which returns `{"dl": "{VAMPIRE_PUBLIC_BASE_URL}/cargo/api/v1/crates"}` — a synthetic response pointing back to the proxy.
+No rewriting. Cargo discovers the download URL from `/cargo/index/config.json`, which returns `{"dl": "{VAMPIRE_PUBLIC_BASE_URL}/cargo/api/v1/crates"}` — a synthetic response pointing back to the proxy. Because sparse index responses are forwarded byte-for-byte, upstream validators remain client-visible on Cargo metadata.
 
 ## Failure logging
 

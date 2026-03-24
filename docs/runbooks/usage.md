@@ -126,6 +126,7 @@ Notes:
 - Artifact misses are single-flight per cache key. Vampire waits for the full upstream artifact before replying, then serves the committed file.
 - Metadata cache fill is best-effort. Concurrent cold metadata requests can fetch upstream in parallel and race to populate cache.
 - Cached metadata is committed as one file, so readers do not see mixed metadata headers and body bytes during revalidation.
+- Rewritten npm and PyPI metadata omit upstream `ETag` and `Last-Modified` in client responses; vampire keeps those validators only for its own upstream revalidation.
 - The cache bound is soft during a successful commit and enforced immediately after the write finishes.
 - Failure logs are JSON lines on stderr with `event=request_failed`, `event=artifact_fetch_failed`, or `event=startup_failed`.
 

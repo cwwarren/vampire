@@ -162,6 +162,7 @@ impl App {
         let status = response.status();
         let upstream_headers = response.headers().clone();
         let body = response.bytes().await.map_err(io::Error::other)?;
+        let expose_upstream_validators = matches!(rewrite, MetadataRewrite::None);
         let rewritten = match rewrite {
             MetadataRewrite::None => body.to_vec(),
             MetadataRewrite::Npm(origin) => {
@@ -171,7 +172,12 @@ impl App {
                 rewrite_pypi_html(&body, self.upstreams(), &origin).map_err(io::Error::other)?
             }
         };
-        let meta = meta_for_bytes(status, &upstream_headers, rewritten.len());
+        let meta = meta_for_bytes(
+            status,
+            &upstream_headers,
+            rewritten.len(),
+            expose_upstream_validators,
+        );
         if status == StatusCode::OK && (meta.etag.is_some() || meta.last_modified.is_some()) {
             let entry = self.cache().store_metadata(&key, &rewritten, &meta).await?;
             return Ok(bytes_response(&entry.meta, entry.body));
@@ -282,7 +288,7 @@ impl App {
                     io::Error::other(e).to_string(),
                 )
             })?;
-            let meta = meta_for_bytes(status, &headers, body.len());
+            let meta = meta_for_bytes(status, &headers, body.len(), true);
             return Ok(FetchOutcome::NonOk(meta, body));
         }
         let mut file = fs::File::create(&leader.paths.temp)
@@ -417,8 +423,13 @@ fn meta_for_bytes(
     status: StatusCode,
     headers: &ReqwestHeaderMap,
     content_length: usize,
+    expose_upstream_validators: bool,
 ) -> StoredResponseMeta {
     let mut meta = meta_from_upstream(status, headers, content_length);
+    if !expose_upstream_validators {
+        strip_header(&mut meta.headers, reqwest::header::ETAG.as_str());
+        strip_header(&mut meta.headers, reqwest::header::LAST_MODIFIED.as_str());
+    }
     if !meta
         .headers
         .iter()
@@ -430,6 +441,10 @@ fn meta_for_bytes(
         ));
     }
     meta
+}
+
+fn strip_header(headers: &mut Vec<(String, String)>, name: &str) {
+    headers.retain(|(header_name, _)| !header_name.eq_ignore_ascii_case(name));
 }
 
 async fn file_response(entry: StoredArtifact) -> io::Result<Response> {

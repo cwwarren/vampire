@@ -26,9 +26,21 @@ pub(crate) fn router() -> Router<App> {
 }
 
 async fn cargo_config_get(State(app): State<App>) -> Response {
-    let body = cargo_config(app.public_base_url());
+    cargo_config_response(app.public_base_url(), false)
+}
+
+async fn cargo_config_head(State(app): State<App>) -> Response {
+    cargo_config_response(app.public_base_url(), true)
+}
+
+fn cargo_config_response(origin: &str, head_only: bool) -> Response {
+    let body = cargo_config(origin);
     let len = body.len();
-    let mut response = Response::new(Body::from(body));
+    let mut response = Response::new(if head_only {
+        Body::empty()
+    } else {
+        Body::from(body)
+    });
     let headers = response.headers_mut();
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     headers.insert(
@@ -36,10 +48,6 @@ async fn cargo_config_get(State(app): State<App>) -> Response {
         HeaderValue::from_str(&len.to_string()).expect("content length"),
     );
     response
-}
-
-async fn cargo_config_head(State(_app): State<App>) -> Response {
-    Response::new(Body::empty())
 }
 
 async fn cargo_index_get(
@@ -63,7 +71,7 @@ async fn cargo_index_head(
     let Some(upstream) = cargo_index_url(app.upstreams(), &path) else {
         return crate::proxy::not_found();
     };
-    app.handle_metadata_head(upstream)
+    app.handle_metadata_head(upstream, MetadataRewrite::None)
         .await
         .unwrap_or_else(|error| request_failed_response("HEAD", &uri, &error))
 }

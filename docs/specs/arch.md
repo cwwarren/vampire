@@ -140,7 +140,12 @@ git request
 
 ### HEAD path
 
-Checks the cache (artifact or metadata as appropriate). On hit, returns headers with empty body. On miss, sends a real HEAD to upstream. No caching occurs on the HEAD path.
+Checks the cache (artifact or metadata as appropriate). On hit, returns the cached GET-equivalent headers with an empty body.
+
+On miss:
+- artifact and non-rewritten metadata paths send a real upstream HEAD and preserve the upstream `Content-Length`
+- rewritten npm and PyPI metadata paths run the normal GET + rewrite flow so vampire can compute the final rewritten headers, then return those headers with an empty body
+- `/cargo/index/config.json` synthesizes the same `Content-Type` and `Content-Length` as GET, but with no body
 
 ## Cache storage
 

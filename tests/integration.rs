@@ -141,6 +141,40 @@ async fn cold_artifact_waits_for_complete_fetch() {
 }
 
 #[tokio::test]
+async fn cold_artifact_head_preserves_content_length() {
+    let upstream = Upstream::new().await.unwrap();
+    upstream
+        .insert(
+            "/crates/demo/demo-1.0.0.crate",
+            UpstreamResponse::bytes(200, "application/octet-stream", vec![b'x'; 128 * 1024]),
+        )
+        .await;
+    let fixture = TestFixture::with_servers(upstream.clone()).await.unwrap();
+    let response = fixture
+        .client
+        .head(format!(
+            "{}/cargo/api/v1/crates/demo/1.0.0/download",
+            fixture.pkg_base_url
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers().get("content-length").unwrap(), "131072");
+    assert_eq!(
+        response.headers().get("content-type").unwrap(),
+        "application/octet-stream"
+    );
+    assert!(response.bytes().await.unwrap().is_empty());
+    assert_eq!(
+        upstream
+            .request_count("/crates/demo/demo-1.0.0.crate")
+            .await,
+        1
+    );
+}
+
+#[tokio::test]
 async fn revalidates_metadata() {
     let upstream = Upstream::new().await.unwrap();
     upstream
@@ -229,6 +263,53 @@ async fn cargo_metadata_preserves_upstream_validators() {
         response.headers().get("last-modified").unwrap(),
         "Wed, 21 Oct 2015 07:28:00 GMT"
     );
+}
+
+#[tokio::test]
+async fn cold_cargo_index_head_matches_get_headers() {
+    let upstream = Upstream::new().await.unwrap();
+    upstream
+        .insert(
+            "/se/rd/serde",
+            UpstreamResponse::json(200, &json!({"name": "serde"})),
+        )
+        .await;
+    let fixture = TestFixture::with_servers(upstream).await.unwrap();
+    let url = format!("{}/cargo/index/se/rd/serde", fixture.pkg_base_url);
+    let head = fixture.client.head(&url).send().await.unwrap();
+    let head_content_type = head
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let head_content_length = head
+        .headers()
+        .get("content-length")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert!(head.bytes().await.unwrap().is_empty());
+
+    let get = fixture.client.get(&url).send().await.unwrap();
+    let get_content_type = get
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let get_content_length = get
+        .headers()
+        .get("content-length")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(head_content_type, get_content_type);
+    assert_eq!(head_content_length, get_content_length);
 }
 
 #[tokio::test]
@@ -334,6 +415,155 @@ async fn serves_cargo_config() {
         .unwrap();
     let body = response.text().await.unwrap();
     assert!(body.contains("/cargo/api/v1/crates"));
+}
+
+#[tokio::test]
+async fn cargo_config_head_matches_get_headers() {
+    let fixture = TestFixture::new().await.unwrap();
+    let url = format!("{}/cargo/index/config.json", fixture.pkg_base_url);
+    let head = fixture.client.head(&url).send().await.unwrap();
+    let head_content_type = head
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let head_content_length = head
+        .headers()
+        .get("content-length")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert!(head.bytes().await.unwrap().is_empty());
+
+    let get = fixture.client.get(&url).send().await.unwrap();
+    let get_content_type = get
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let get_content_length = get
+        .headers()
+        .get("content-length")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(head_content_type, get_content_type);
+    assert_eq!(head_content_length, get_content_length);
+}
+
+#[tokio::test]
+async fn cold_npm_head_matches_get_headers() {
+    let upstream = Upstream::new().await.unwrap();
+    upstream
+        .insert(
+            "/pkg",
+            UpstreamResponse::json(
+                200,
+                &json!({
+                    "dist": {
+                        "tarball": "https://registry.npmjs.org/pkg/-/pkg-1.0.0.tgz"
+                    }
+                }),
+            ),
+        )
+        .await;
+    let fixture = TestFixture::with_servers(upstream).await.unwrap();
+    let url = format!("{}/npm/pkg", fixture.pkg_base_url);
+    let head = fixture.client.head(&url).send().await.unwrap();
+    let head_content_type = head
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let head_content_length = head
+        .headers()
+        .get("content-length")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert!(head.bytes().await.unwrap().is_empty());
+
+    let get = fixture.client.get(&url).send().await.unwrap();
+    let get_content_type = get
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let get_content_length = get
+        .headers()
+        .get("content-length")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let get_body = get.bytes().await.unwrap();
+    assert_eq!(head_content_type, get_content_type);
+    assert_eq!(head_content_length, get_content_length);
+    assert_eq!(head_content_length, get_body.len().to_string());
+}
+
+#[tokio::test]
+async fn cold_pypi_head_matches_get_headers() {
+    let upstream = Upstream::new().await.unwrap();
+    upstream
+        .insert(
+            "/simple/pkg/",
+            UpstreamResponse::text(
+                200,
+                "text/html",
+                r#"<a href="https://files.pythonhosted.org/packages/pkg.whl#sha256=abc">pkg</a>"#,
+            ),
+        )
+        .await;
+    let fixture = TestFixture::with_servers(upstream).await.unwrap();
+    let url = format!("{}/pypi/simple/pkg/", fixture.pkg_base_url);
+    let head = fixture.client.head(&url).send().await.unwrap();
+    let head_content_type = head
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let head_content_length = head
+        .headers()
+        .get("content-length")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert!(head.bytes().await.unwrap().is_empty());
+
+    let get = fixture.client.get(&url).send().await.unwrap();
+    let get_content_type = get
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let get_content_length = get
+        .headers()
+        .get("content-length")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let get_body = get.bytes().await.unwrap();
+    assert_eq!(head_content_type, get_content_type);
+    assert_eq!(head_content_length, get_content_length);
+    assert_eq!(head_content_length, get_body.len().to_string());
 }
 
 #[tokio::test]

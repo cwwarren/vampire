@@ -41,9 +41,12 @@ async fn npm_packument_head(State(app): State<App>, OriginalUri(uri): OriginalUr
     let Some(upstream) = npm_packument_url(app.upstreams(), package) else {
         return crate::proxy::not_found();
     };
-    app.handle_metadata_head(upstream)
-        .await
-        .unwrap_or_else(|error| request_failed_response("HEAD", &uri, &error))
+    app.handle_metadata_head(
+        upstream,
+        MetadataRewrite::Npm(app.public_base_url().to_owned()),
+    )
+    .await
+    .unwrap_or_else(|error| request_failed_response("HEAD", &uri, &error))
 }
 
 async fn npm_tarball_get(

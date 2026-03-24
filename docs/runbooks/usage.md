@@ -127,6 +127,7 @@ Notes:
 - Metadata cache fill is best-effort. Concurrent cold metadata requests can fetch upstream in parallel and race to populate cache.
 - Cached metadata is committed as one file, so readers do not see mixed metadata headers and body bytes during revalidation.
 - Rewritten npm and PyPI metadata omit upstream `ETag` and `Last-Modified` in client responses; vampire keeps those validators only for its own upstream revalidation.
+- HEAD responses mirror GET headers. On cold rewritten npm/PyPI metadata requests, vampire performs the normal fetch-and-rewrite path so `Content-Length` matches the eventual GET response.
 - The cache bound is soft during a successful commit and enforced immediately after the write finishes.
 - Failure logs are JSON lines on stderr with `event=request_failed`, `event=artifact_fetch_failed`, or `event=startup_failed`.
 

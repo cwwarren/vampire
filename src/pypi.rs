@@ -38,9 +38,12 @@ async fn pypi_simple_root_head(State(app): State<App>, OriginalUri(uri): Origina
     let Some(upstream) = pypi_simple_url(app.upstreams(), None) else {
         return crate::proxy::not_found();
     };
-    app.handle_metadata_head(upstream)
-        .await
-        .unwrap_or_else(|error| request_failed_response("HEAD", &uri, &error))
+    app.handle_metadata_head(
+        upstream,
+        MetadataRewrite::Pypi(app.public_base_url().to_owned()),
+    )
+    .await
+    .unwrap_or_else(|error| request_failed_response("HEAD", &uri, &error))
 }
 
 async fn pypi_simple_project_get(
@@ -67,9 +70,12 @@ async fn pypi_simple_project_head(
     let Some(upstream) = pypi_simple_url(app.upstreams(), Some(&project)) else {
         return crate::proxy::not_found();
     };
-    app.handle_metadata_head(upstream)
-        .await
-        .unwrap_or_else(|error| request_failed_response("HEAD", &uri, &error))
+    app.handle_metadata_head(
+        upstream,
+        MetadataRewrite::Pypi(app.public_base_url().to_owned()),
+    )
+    .await
+    .unwrap_or_else(|error| request_failed_response("HEAD", &uri, &error))
 }
 
 async fn pypi_file_get(

@@ -76,26 +76,34 @@ impl App {
             .send()
             .await
             .map_err(io::Error::other)?;
-        let meta = meta_from_upstream(response.status(), response.headers(), 0);
+        let meta = meta_from_upstream(response.status(), response.headers(), None);
         Ok(empty_response_from_meta(&meta))
     }
 
     pub(crate) async fn handle_metadata_head(
         &self,
         upstream: reqwest::Url,
+        rewrite: MetadataRewrite,
     ) -> io::Result<Response> {
         let key = CacheStore::metadata_key(upstream.as_str());
         if let Some(entry) = self.cache().load_metadata(&key).await? {
             return Ok(empty_response_from_meta(&entry.meta));
         }
-        let response = self
-            .client()
-            .head(upstream)
-            .send()
-            .await
-            .map_err(io::Error::other)?;
-        let meta = meta_from_upstream(response.status(), response.headers(), 0);
-        Ok(empty_response_from_meta(&meta))
+        match rewrite {
+            MetadataRewrite::None => {
+                let response = self
+                    .client()
+                    .head(upstream)
+                    .send()
+                    .await
+                    .map_err(io::Error::other)?;
+                let meta = meta_from_upstream(response.status(), response.headers(), None);
+                Ok(empty_response_from_meta(&meta))
+            }
+            rewrite => Ok(response_without_body(
+                self.fetch_metadata(upstream, rewrite, key).await?,
+            )),
+        }
     }
 
     pub(crate) async fn handle_metadata(
@@ -315,7 +323,7 @@ impl App {
             .await
             .map_err(|e| ("flush_temp_file".into(), e.to_string()))?;
         drop(file);
-        let meta = meta_from_upstream(status, &headers, content_length);
+        let meta = meta_from_upstream(status, &headers, Some(content_length));
         self.cache()
             .commit_artifact(&leader.key, &meta, &leader.paths.temp)
             .await
@@ -385,21 +393,21 @@ pub(crate) fn request_failed_response(method: &str, uri: &Uri, error: &io::Error
 fn meta_from_upstream(
     status: StatusCode,
     headers: &ReqwestHeaderMap,
-    content_length: usize,
+    content_length: Option<usize>,
 ) -> StoredResponseMeta {
     let mut stored_headers = Vec::new();
     for (name, value) in headers {
         if is_hop_header(name.as_str()) {
             continue;
         }
-        if name.as_str() == CONTENT_LENGTH.as_str() {
+        if content_length.is_some() && name.as_str() == CONTENT_LENGTH.as_str() {
             continue;
         }
         if let Ok(value) = value.to_str() {
             stored_headers.push((name.as_str().to_owned(), value.to_owned()));
         }
     }
-    if content_length > 0 {
+    if let Some(content_length) = content_length {
         stored_headers.push((
             CONTENT_LENGTH.as_str().to_owned(),
             content_length.to_string(),
@@ -425,7 +433,7 @@ fn meta_for_bytes(
     content_length: usize,
     expose_upstream_validators: bool,
 ) -> StoredResponseMeta {
-    let mut meta = meta_from_upstream(status, headers, content_length);
+    let mut meta = meta_from_upstream(status, headers, Some(content_length));
     if !expose_upstream_validators {
         strip_header(&mut meta.headers, reqwest::header::ETAG.as_str());
         strip_header(&mut meta.headers, reqwest::header::LAST_MODIFIED.as_str());
@@ -460,6 +468,11 @@ fn bytes_response(meta: &StoredResponseMeta, body: Bytes) -> Response {
     *response.status_mut() = StatusCode::from_u16(meta.status).unwrap_or(StatusCode::OK);
     apply_headers(response.headers_mut(), &meta.headers);
     response
+}
+
+fn response_without_body(response: Response) -> Response {
+    let (parts, _) = response.into_parts();
+    Response::from_parts(parts, Body::empty())
 }
 
 fn empty_response_from_meta(meta: &StoredResponseMeta) -> Response {

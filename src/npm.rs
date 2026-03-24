@@ -1,9 +1,9 @@
-use crate::proxy::{MetadataRewrite, request_failed_response, request_origin};
+use crate::proxy::{MetadataRewrite, request_failed_response};
 use crate::routes::{npm_packument_url, npm_tarball_url};
 use crate::state::App;
 use axum::Router;
 use axum::extract::{OriginalUri, Path, State};
-use axum::http::{HeaderMap, Uri};
+use axum::http::Uri;
 use axum::response::Response;
 use axum::routing::get;
 
@@ -19,21 +19,19 @@ pub(crate) fn router() -> Router<App> {
         )
 }
 
-async fn npm_packument_get(
-    State(app): State<App>,
-    OriginalUri(uri): OriginalUri,
-    headers: HeaderMap,
-) -> Response {
-    let origin = request_origin(&headers);
+async fn npm_packument_get(State(app): State<App>, OriginalUri(uri): OriginalUri) -> Response {
     let Some(package) = raw_path_tail(&uri, "/npm/") else {
         return crate::proxy::not_found();
     };
     let Some(upstream) = npm_packument_url(app.upstreams(), package) else {
         return crate::proxy::not_found();
     };
-    app.handle_metadata(upstream, MetadataRewrite::Npm(origin))
-        .await
-        .unwrap_or_else(|error| request_failed_response("GET", &uri, &error))
+    app.handle_metadata(
+        upstream,
+        MetadataRewrite::Npm(app.public_base_url().to_owned()),
+    )
+    .await
+    .unwrap_or_else(|error| request_failed_response("GET", &uri, &error))
 }
 
 async fn npm_packument_head(State(app): State<App>, OriginalUri(uri): OriginalUri) -> Response {

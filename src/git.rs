@@ -58,7 +58,10 @@ impl App {
             }
         }
         let upstream_str = upstream.as_str().to_owned();
-        let mut request = self.client().request(method, upstream).headers(forwarded_headers);
+        let mut request = self
+            .client()
+            .request(method, upstream)
+            .headers(forwarded_headers);
         if let Some(body) = body {
             request = request.body(body);
         }
@@ -200,10 +203,10 @@ impl ParsedGitRequest {
                 return Self::Rejected(
                     StatusCode::METHOD_NOT_ALLOWED,
                     "git-receive-pack is not supported",
-                )
+                );
             }
             Err(GitPathError::Invalid) => {
-                return Self::Rejected(StatusCode::BAD_REQUEST, "invalid git path")
+                return Self::Rejected(StatusCode::BAD_REQUEST, "invalid git path");
             }
         };
 

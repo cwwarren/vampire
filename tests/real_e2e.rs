@@ -28,8 +28,16 @@ async fn pypi_real_e2e_cold_warm_concurrent() {
     assert_no_artifact_fetches(&fixture.app.stats().snapshot(), "pypi warm");
 
     let concurrent = RealFixture::new().await.unwrap();
-    let first = run_pip_install(&concurrent.pkg_base_url, concurrent.temp.path(), "concurrent-a");
-    let second = run_pip_install(&concurrent.pkg_base_url, concurrent.temp.path(), "concurrent-b");
+    let first = run_pip_install(
+        &concurrent.pkg_base_url,
+        concurrent.temp.path(),
+        "concurrent-a",
+    );
+    let second = run_pip_install(
+        &concurrent.pkg_base_url,
+        concurrent.temp.path(),
+        "concurrent-b",
+    );
     let (first, second) = tokio::join!(first, second);
     first.unwrap();
     second.unwrap();
@@ -53,8 +61,16 @@ async fn npm_real_e2e_cold_warm_concurrent() {
     assert_no_artifact_fetches(&fixture.app.stats().snapshot(), "npm warm");
 
     let concurrent = RealFixture::new().await.unwrap();
-    let first = run_npm_install(&concurrent.pkg_base_url, concurrent.temp.path(), "concurrent-a");
-    let second = run_npm_install(&concurrent.pkg_base_url, concurrent.temp.path(), "concurrent-b");
+    let first = run_npm_install(
+        &concurrent.pkg_base_url,
+        concurrent.temp.path(),
+        "concurrent-a",
+    );
+    let second = run_npm_install(
+        &concurrent.pkg_base_url,
+        concurrent.temp.path(),
+        "concurrent-b",
+    );
     let (first, second) = tokio::join!(first, second);
     first.unwrap();
     second.unwrap();
@@ -78,8 +94,16 @@ async fn cargo_real_e2e_cold_warm_concurrent() {
     assert_no_artifact_fetches(&fixture.app.stats().snapshot(), "cargo warm");
 
     let concurrent = RealFixture::new().await.unwrap();
-    let first = run_cargo_build(&concurrent.pkg_base_url, concurrent.temp.path(), "concurrent-a");
-    let second = run_cargo_build(&concurrent.pkg_base_url, concurrent.temp.path(), "concurrent-b");
+    let first = run_cargo_build(
+        &concurrent.pkg_base_url,
+        concurrent.temp.path(),
+        "concurrent-a",
+    );
+    let second = run_cargo_build(
+        &concurrent.pkg_base_url,
+        concurrent.temp.path(),
+        "concurrent-b",
+    );
     let (first, second) = tokio::join!(first, second);
     first.unwrap();
     second.unwrap();
@@ -108,9 +132,7 @@ async fn pip_git_pinned_dependency_through_proxy() {
     let git_config = write_git_proxy_config(&run_dir, &fixture.git_base_url)
         .await
         .unwrap();
-    let mut envs = vec![
-        ("PIP_CONFIG_FILE", "/dev/null".to_owned()),
-    ];
+    let mut envs = vec![("PIP_CONFIG_FILE", "/dev/null".to_owned())];
     envs.extend(git_proxy_envs(&git_config, false));
     let install = run_command(
         "python3",
@@ -137,10 +159,7 @@ async fn pip_git_pinned_dependency_through_proxy() {
     ensure_success("pip install git dep", &install).unwrap();
     let validate = run_command(
         "python3",
-        [
-            "-c",
-            "from test_pkgs import add; assert add(2, 3) == 5",
-        ],
+        ["-c", "from test_pkgs import add; assert add(2, 3) == 5"],
         None,
         vec![(
             "PYTHONPATH",
@@ -300,6 +319,7 @@ impl RealFixture {
         let config = Config {
             pkg_bind,
             git_bind,
+            public_base_url: format!("http://{pkg_bind}"),
             cache_dir,
             max_cache_size: 3 * (1 << 30),
             max_upstream_fetches: 32,
@@ -654,7 +674,10 @@ fn ensure_success(context: &str, output: &Output) -> io::Result<()> {
     )))
 }
 
-async fn write_git_proxy_config(run_dir: &Path, git_base_url: &str) -> io::Result<std::path::PathBuf> {
+async fn write_git_proxy_config(
+    run_dir: &Path,
+    git_base_url: &str,
+) -> io::Result<std::path::PathBuf> {
     let git_config = run_dir.join("gitconfig");
     let configure = run_command(
         "git",

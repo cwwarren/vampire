@@ -14,6 +14,7 @@ USER vampire
 ENV VAMPIRE_PKG_BIND=0.0.0.0:8080
 ENV VAMPIRE_GIT_BIND=0.0.0.0:8081
 ENV VAMPIRE_CACHE_DIR=/var/cache/vampire
+# Set VAMPIRE_PUBLIC_BASE_URL at runtime to the externally reachable package-listener origin.
 WORKDIR /var/cache/vampire
 EXPOSE 8080
 EXPOSE 8081

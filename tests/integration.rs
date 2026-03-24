@@ -280,6 +280,106 @@ async fn serves_cargo_config() {
 }
 
 #[tokio::test]
+async fn cargo_config_ignores_spoofed_origin_headers() {
+    let fixture = TestFixture::with_servers_and_public_base_url(
+        Upstream::new().await.unwrap(),
+        listen_addr().await.unwrap(),
+        "https://packages.example".to_owned(),
+    )
+    .await
+    .unwrap();
+    let response = fixture
+        .client
+        .get(format!("{}/cargo/index/config.json", fixture.pkg_base_url))
+        .header("host", "evil.example")
+        .header("x-forwarded-proto", "http")
+        .send()
+        .await
+        .unwrap();
+    let body = response.text().await.unwrap();
+    assert!(body.contains(&format!("{}/cargo/api/v1/crates", fixture.public_base_url)));
+    assert!(!body.contains("evil.example"));
+}
+
+#[tokio::test]
+async fn npm_rewrite_ignores_spoofed_origin_headers() {
+    let upstream = Upstream::new().await.unwrap();
+    upstream
+        .insert(
+            "/pkg",
+            UpstreamResponse::json(
+                200,
+                &json!({
+                    "dist": {
+                        "tarball": "https://registry.npmjs.org/pkg/-/pkg-1.0.0.tgz"
+                    }
+                }),
+            ),
+        )
+        .await;
+    let fixture = TestFixture::with_servers_and_public_base_url(
+        upstream,
+        listen_addr().await.unwrap(),
+        "https://packages.example".to_owned(),
+    )
+    .await
+    .unwrap();
+    let response = fixture
+        .client
+        .get(format!("{}/npm/pkg", fixture.pkg_base_url))
+        .header("host", "evil.example")
+        .header("x-forwarded-proto", "http")
+        .send()
+        .await
+        .unwrap();
+    let body =
+        serde_json::from_slice::<serde_json::Value>(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(
+        body["dist"]["tarball"].as_str().unwrap(),
+        format!(
+            "{}/npm/tarballs/pkg/-/pkg-1.0.0.tgz",
+            fixture.public_base_url
+        )
+    );
+}
+
+#[tokio::test]
+async fn pypi_rewrite_ignores_spoofed_origin_headers() {
+    let upstream = Upstream::new().await.unwrap();
+    upstream
+        .insert(
+            "/simple/pkg/",
+            UpstreamResponse::text(
+                200,
+                "text/html",
+                r#"<a href="https://files.pythonhosted.org/packages/pkg.whl#sha256=abc">pkg</a>"#,
+            ),
+        )
+        .await;
+    let fixture = TestFixture::with_servers_and_public_base_url(
+        upstream,
+        listen_addr().await.unwrap(),
+        "https://packages.example".to_owned(),
+    )
+    .await
+    .unwrap();
+    let response = fixture
+        .client
+        .get(format!("{}/pypi/simple/pkg/", fixture.pkg_base_url))
+        .header("host", "evil.example")
+        .header("x-forwarded-proto", "http")
+        .send()
+        .await
+        .unwrap();
+    let body = response.text().await.unwrap();
+    assert!(body.contains(&format!(
+        "{}/pypi/files/packages/pkg.whl#sha256=abc",
+        fixture.public_base_url
+    )));
+    assert!(!body.contains("evil.example"));
+}
+
+#[tokio::test]
 async fn git_readonly_forwards_smart_http_requests() {
     let upstream = Upstream::new().await.unwrap();
     upstream
@@ -631,6 +731,7 @@ struct TestFixture {
     git_bind: SocketAddr,
     pkg_base_url: String,
     git_base_url: String,
+    public_base_url: String,
     client: Client,
 }
 
@@ -640,12 +741,22 @@ impl TestFixture {
     }
 
     async fn with_servers(upstream: Upstream) -> io::Result<Self> {
-        let temp_dir = tempfile::tempdir()?;
         let pkg_bind = listen_addr().await?;
+        let public_base_url = format!("http://{pkg_bind}");
+        Self::with_servers_and_public_base_url(upstream, pkg_bind, public_base_url).await
+    }
+
+    async fn with_servers_and_public_base_url(
+        upstream: Upstream,
+        pkg_bind: SocketAddr,
+        public_base_url: String,
+    ) -> io::Result<Self> {
+        let temp_dir = tempfile::tempdir()?;
         let git_bind = listen_addr().await?;
         let config = Config {
             pkg_bind,
             git_bind,
+            public_base_url: public_base_url.clone(),
             cache_dir: PathBuf::from(temp_dir.path()),
             max_cache_size: 32 * 1024 * 1024,
             max_upstream_fetches: 8,
@@ -679,6 +790,7 @@ impl TestFixture {
             git_bind: config.git_bind,
             pkg_base_url: format!("http://{}", config.pkg_bind),
             git_base_url: format!("http://{}", config.git_bind),
+            public_base_url,
             client,
         })
     }

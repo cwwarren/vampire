@@ -16,6 +16,7 @@ pub(crate) struct AppInner {
     pub(crate) client: Client,
     pub(crate) stats: AppStats,
     pub(crate) upstreams: RegistryOrigins,
+    pub(crate) public_base_url: String,
 }
 
 impl App {
@@ -41,6 +42,7 @@ impl App {
                 client,
                 stats: AppStats::default(),
                 upstreams,
+                public_base_url: config.public_base_url.clone(),
             }),
         })
     }
@@ -63,5 +65,9 @@ impl App {
 
     pub(crate) fn upstreams(&self) -> &RegistryOrigins {
         &self.inner.upstreams
+    }
+
+    pub(crate) fn public_base_url(&self) -> &str {
+        &self.inner.public_base_url
     }
 }

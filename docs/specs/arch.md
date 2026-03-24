@@ -61,7 +61,7 @@ Package routes accept GET and HEAD on the package listener:
 
 | Path | Type | Handler |
 |---|---|---|
-| `/cargo/index/config.json` | synthetic | Returns `{"dl": "{origin}/cargo/api/v1/crates"}` |
+| `/cargo/index/config.json` | synthetic | Returns `{"dl": "{VAMPIRE_PUBLIC_BASE_URL}/cargo/api/v1/crates"}` |
 | `/cargo/index/{*path}` | metadata | Cargo sparse index entries |
 | `/cargo/api/v1/crates/{crate_name}/{version}/download` | artifact | Cargo crate tarballs |
 | `/pypi/simple/` | metadata | PyPI simple index root |
@@ -237,24 +237,24 @@ Metadata and artifact entries compete equally for space. There is no separate qu
 
 ## Metadata rewriting
 
-The proxy rewrites upstream metadata responses to redirect artifact downloads through itself. The rewrite origin is derived from the incoming request's `X-Forwarded-Proto` and `Host` headers (defaulting to `http://localhost`).
+The proxy rewrites upstream metadata responses to redirect artifact downloads through itself. The rewrite origin is the configured `VAMPIRE_PUBLIC_BASE_URL`. Client request headers do not influence emitted artifact URLs.
 
 ### PyPI (HTML)
 
 Regex-matches all `href="..."` and `href='...'` attributes. For each:
-- URLs matching the configured `pypi_files` origin or hostname `files.pythonhosted.org` → `{origin}/pypi/files/{relative_path}` (preserving `#hash` fragments)
-- URLs matching the configured `pypi_simple` origin or hostname `pypi.org`, with path starting `/simple/` → `{origin}{path}` (strips host, keeps path)
+- URLs matching the configured `pypi_files` origin or hostname `files.pythonhosted.org` → `{VAMPIRE_PUBLIC_BASE_URL}/pypi/files/{relative_path}` (preserving `#hash` fragments)
+- URLs matching the configured `pypi_simple` origin or hostname `pypi.org`, with path starting `/simple/` → `{VAMPIRE_PUBLIC_BASE_URL}{path}` (strips host, keeps path)
 - Other URLs → unchanged
 
 ### npm (JSON)
 
 Parses the full packument as `serde_json::Value`. Rewrites `dist.tarball` on the root object and on every entry in `versions.*`:
-- URLs matching the configured `npm` origin or hostname `registry.npmjs.org` → `{origin}/npm/tarballs/{relative_path}`
+- URLs matching the configured `npm` origin or hostname `registry.npmjs.org` → `{VAMPIRE_PUBLIC_BASE_URL}/npm/tarballs/{relative_path}`
 - Other URLs → unchanged
 
 ### Cargo
 
-No rewriting. Cargo discovers the download URL from `/cargo/index/config.json`, which returns `{"dl": "{origin}/cargo/api/v1/crates"}` — a synthetic response pointing back to the proxy.
+No rewriting. Cargo discovers the download URL from `/cargo/index/config.json`, which returns `{"dl": "{VAMPIRE_PUBLIC_BASE_URL}/cargo/api/v1/crates"}` — a synthetic response pointing back to the proxy.
 
 ## Failure logging
 

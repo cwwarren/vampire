@@ -2,7 +2,9 @@
 
 ## Start
 ```bash
-VAMPIRE_MAX_CACHE_SIZE_MB=10000 cargo run
+VAMPIRE_PUBLIC_BASE_URL=http://127.0.0.1:8080 \
+VAMPIRE_MAX_CACHE_SIZE_MB=10000 \
+cargo run
 ```
 
 ## Container
@@ -11,6 +13,7 @@ docker run --rm \
   -p 8080:8080 \
   -p 8081:8081 \
   -v vampire-cache:/var/cache/vampire \
+  -e VAMPIRE_PUBLIC_BASE_URL=http://127.0.0.1:8080 \
   -e VAMPIRE_MAX_CACHE_SIZE_MB=10000 \
   ghcr.io/cwwarren/vampire:latest
 ```
@@ -19,6 +22,7 @@ Container defaults:
 - `VAMPIRE_PKG_BIND=0.0.0.0:8080`
 - `VAMPIRE_GIT_BIND=0.0.0.0:8081`
 - `VAMPIRE_CACHE_DIR=/var/cache/vampire`
+- `VAMPIRE_PUBLIC_BASE_URL` has no default and must be set to the externally reachable package-listener origin
 - Published tags are `latest` and `sha-<full git sha>`
 
 ## Client Configuration

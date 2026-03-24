@@ -6,7 +6,7 @@ use crate::failure_log::log_failure;
 use crate::routes::{rewrite_npm_json, rewrite_pypi_html};
 use crate::state::App;
 use axum::body::Body;
-use axum::http::header::{CONTENT_LENGTH, CONTENT_TYPE, HOST, IF_MODIFIED_SINCE, IF_NONE_MATCH};
+use axum::http::header::{CONTENT_LENGTH, CONTENT_TYPE, IF_MODIFIED_SINCE, IF_NONE_MATCH};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, Uri};
 use axum::response::Response;
 use bytes::Bytes;
@@ -376,18 +376,6 @@ pub(crate) fn request_failed_response(method: &str, uri: &Uri, error: &io::Error
     )
 }
 
-pub(crate) fn request_origin(headers: &HeaderMap) -> String {
-    let scheme = headers
-        .get("x-forwarded-proto")
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("http");
-    let host = headers
-        .get(HOST)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("localhost");
-    format!("{scheme}://{host}")
-}
-
 fn meta_from_upstream(
     status: StatusCode,
     headers: &ReqwestHeaderMap,
@@ -505,6 +493,7 @@ mod tests {
         let config = Config {
             pkg_bind: "127.0.0.1:0".parse().unwrap(),
             git_bind: "127.0.0.1:0".parse().unwrap(),
+            public_base_url: "http://127.0.0.1:8080".to_owned(),
             cache_dir: PathBuf::from(temp.path()),
             max_cache_size: 16 * 1024 * 1024,
             max_upstream_fetches: 4,

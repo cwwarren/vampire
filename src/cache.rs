@@ -403,6 +403,7 @@ mod tests {
         let config = Config {
             pkg_bind: "127.0.0.1:0".parse().unwrap(),
             git_bind: "127.0.0.1:0".parse().unwrap(),
+            public_base_url: "http://127.0.0.1:8080".to_owned(),
             cache_dir: PathBuf::from(temp.path()),
             max_cache_size: 1024 * 1024,
             max_upstream_fetches: 4,

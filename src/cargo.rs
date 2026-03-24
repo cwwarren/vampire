@@ -1,11 +1,11 @@
-use crate::proxy::{MetadataRewrite, request_failed_response, request_origin};
+use crate::proxy::{MetadataRewrite, request_failed_response};
 use crate::routes::{cargo_config, cargo_download_url, cargo_index_url};
 use crate::state::App;
 use axum::Router;
 use axum::body::Body;
 use axum::extract::{OriginalUri, Path, State};
+use axum::http::HeaderValue;
 use axum::http::header::{CONTENT_LENGTH, CONTENT_TYPE};
-use axum::http::{HeaderMap, HeaderValue};
 use axum::response::Response;
 use axum::routing::get;
 
@@ -25,9 +25,8 @@ pub(crate) fn router() -> Router<App> {
         )
 }
 
-async fn cargo_config_get(State(_app): State<App>, headers: HeaderMap) -> Response {
-    let origin = request_origin(&headers);
-    let body = cargo_config(&origin);
+async fn cargo_config_get(State(app): State<App>) -> Response {
+    let body = cargo_config(app.public_base_url());
     let len = body.len();
     let mut response = Response::new(Body::from(body));
     let headers = response.headers_mut();

@@ -59,10 +59,6 @@ impl App {
         &self.inner.client
     }
 
-    pub(crate) fn app_stats(&self) -> &AppStats {
-        &self.inner.stats
-    }
-
     pub(crate) fn upstreams(&self) -> &RegistryOrigins {
         &self.inner.upstreams
     }

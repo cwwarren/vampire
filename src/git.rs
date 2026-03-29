@@ -66,7 +66,7 @@ impl App {
             request = request.body(body);
         }
         let response = request.send().await.map_err(io::Error::other)?;
-        self.app_stats().record_git_forward(&upstream_str);
+        self.stats().record_git_forward(&upstream_str);
         let status = response.status();
         let upstream_headers = response.headers().clone();
         let mut output = Response::new(Body::from_stream(response.bytes_stream()));

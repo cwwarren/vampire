@@ -131,7 +131,7 @@ impl App {
         entry: StoredMetadata,
     ) -> io::Result<Response> {
         let mut request = self.client().get(upstream.clone());
-        self.app_stats().record_metadata_fetch(upstream.as_str());
+        self.stats().record_metadata_fetch(upstream.as_str());
         if let Some(etag) = &entry.meta.etag {
             request = request.header(IF_NONE_MATCH.as_str(), etag);
         }
@@ -151,7 +151,7 @@ impl App {
         rewrite: MetadataRewrite,
         key: String,
     ) -> io::Result<Response> {
-        self.app_stats().record_metadata_fetch(upstream.as_str());
+        self.stats().record_metadata_fetch(upstream.as_str());
         let response = self
             .client()
             .get(upstream)
@@ -198,7 +198,7 @@ impl App {
         match self.cache().lookup_or_start_artifact(key.clone()).await? {
             ArtifactLookup::Hit(entry) => file_response(entry).await,
             ArtifactLookup::Join(inflight) => {
-                self.app_stats().record_artifact_join(upstream.as_str());
+                self.stats().record_artifact_join(upstream.as_str());
                 self.serve_inflight(&key, inflight).await
             }
             ArtifactLookup::Leader(leader) => {
@@ -280,7 +280,7 @@ impl App {
             .acquire_upstream_permit()
             .await
             .map_err(|e| ("acquire_upstream_permit".into(), e.to_string()))?;
-        self.app_stats().record_artifact_fetch(upstream.as_str());
+        self.stats().record_artifact_fetch(upstream.as_str());
         let response = self
             .client()
             .get(upstream.clone())

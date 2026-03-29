@@ -24,6 +24,8 @@ jobs:
       - name: Install cargo quality tools
         run: cargo install --locked cargo-udeps cargo-llvm-cov
       - name: Run heavy checks
+        env:
+          RUSTUP_TOOLCHAIN: stable
         run: ./scripts/check-heavy.sh
 
   build-real-e2e:

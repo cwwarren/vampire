@@ -13,6 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
       - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
         with:
           components: rustfmt, clippy, llvm-tools-preview
@@ -25,13 +26,40 @@ jobs:
       - name: Run heavy checks
         run: ./scripts/check-heavy.sh
 
+  build-real-e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+      - name: Build live end-to-end test binary
+        run: cargo test --locked --test real_e2e --no-run
+      - name: Package live end-to-end test binary
+        run: |
+          mkdir -p .ci-artifacts/real-e2e
+          real_e2e_bin=$(find target/debug/deps -maxdepth 1 -type f -name 'real_e2e-*' -perm -111 | head -n1)
+          cp "$real_e2e_bin" .ci-artifacts/real-e2e/real_e2e
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: real-e2e-binary
+          path: .ci-artifacts/real-e2e/real_e2e
+          if-no-files-found: error
+
   real-e2e:
+    needs:
+      - build-real-e2e
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: real-e2e-binary
+          path: .ci-artifacts/real-e2e
       - name: Run live end-to-end suite
-        run: cargo test --locked --test real_e2e -- --ignored --test-threads=1 --nocapture
+        run: |
+          chmod +x .ci-artifacts/real-e2e/real_e2e
+          ./.ci-artifacts/real-e2e/real_e2e --ignored --test-threads=1 --nocapture
 
   publish-image:
     if: startsWith(github.ref, 'refs/tags/v')

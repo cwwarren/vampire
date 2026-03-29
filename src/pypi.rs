@@ -13,7 +13,7 @@ pub(crate) fn router() -> Router<App> {
             get(pypi_simple_root_get).head(pypi_simple_root_head),
         )
         .route(
-            "/pypi/simple/{*project}",
+            "/pypi/simple/{project}/",
             get(pypi_simple_project_get).head(pypi_simple_project_head),
         )
         .route(

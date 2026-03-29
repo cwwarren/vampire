@@ -51,8 +51,7 @@ pub fn pypi_simple_url(upstreams: &RegistryOrigins, project: Option<&str>) -> Op
     match project {
         None => join_url(&upstreams.pypi_simple, "simple/"),
         Some(project) => {
-            let project = project.strip_suffix('/')?;
-            if project.is_empty() || project.contains('/') {
+            if project.is_empty() {
                 return None;
             }
             join_url(&upstreams.pypi_simple, &format!("simple/{project}/"))
@@ -204,7 +203,7 @@ mod tests {
         assert!(cargo_index_url(&upstreams, "config.json").is_some());
         assert!(cargo_download_url(&upstreams, "serde", "1.0.0").is_some());
         assert!(npm_packument_url(&upstreams, "@scope%2fname").is_some());
-        assert!(pypi_simple_url(&upstreams, Some("pkg/")).is_some());
+        assert!(pypi_simple_url(&upstreams, Some("pkg")).is_some());
         assert!(pypi_file_url("packages/pkg.whl", &upstreams).is_some());
         assert!(npm_tarball_url("pkg/-/pkg-1.0.0.tgz", &upstreams).is_some());
         assert_eq!(upstreams.github.as_str(), "https://github.com/");

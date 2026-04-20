@@ -65,7 +65,7 @@ Package routes accept GET and HEAD on the package listener:
 | `/cargo/index/{*path}` | metadata | Cargo sparse index entries |
 | `/cargo/api/v1/crates/{crate_name}/{version}/download` | artifact | Cargo crate tarballs |
 | `/pypi/simple/` | metadata | PyPI simple index root |
-| `/pypi/simple/{*project}` | metadata | PyPI simple project page |
+| `/pypi/simple/{project}/` | metadata | PyPI simple project page |
 | `/pypi/files/{*path}` | artifact | PyPI package files |
 | `/npm/{*package}` | metadata | npm packument JSON |
 | `/npm/tarballs/{*path}` | artifact | npm tarballs |
@@ -78,6 +78,8 @@ The git listener routes every request through the git handler. The git surface i
 | `/{owner}/{repo}.git/git-upload-pack` | git RPC | Forward to GitHub |
 
 Artifact routes for PyPI and npm encode the upstream path directly in the URL (e.g., `/pypi/files/packages/ab/cd/file.whl`). The proxy joins this path with the known upstream base URL. Path injection is prevented by `join_url`, which rejects absolute paths, `//` prefixes, and full URLs, then validates the resulting origin matches the base.
+
+PyPI simple project routes accept exactly one decoded project path segment. Requests whose decoded project contains `/`, including percent-encoded slashes, are rejected locally before any upstream URL is built.
 
 Git traffic stays uncached and fail-closed. The handler parses the raw request URI, rejects absolute-form targets, URL-userinfo, `git-receive-pack`, doubled slashes, dot segments, encoded repo segments, encoded separators, malformed escapes, and other non-canonical path forms locally, then forwards only accepted `git-upload-pack` requests to `https://github.com`. Upload-pack request bodies are buffered up to 8 MiB before forwarding, while accepted upstream git responses are streamed directly back to the client.
 

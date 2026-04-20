@@ -62,6 +62,40 @@ async fn rewrites_pypi_links() {
 }
 
 #[tokio::test]
+async fn rejects_encoded_slashes_in_pypi_project_get() {
+    let upstream = Upstream::new().await.unwrap();
+    let fixture = TestFixture::with_servers(upstream.clone()).await.unwrap();
+    let response = fixture
+        .client
+        .get(format!(
+            "{}/pypi/simple/..%2F..%2Fadmin/",
+            fixture.pkg_base_url
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert!(upstream.recorded_requests().await.is_empty());
+}
+
+#[tokio::test]
+async fn rejects_encoded_slashes_in_pypi_project_head() {
+    let upstream = Upstream::new().await.unwrap();
+    let fixture = TestFixture::with_servers(upstream.clone()).await.unwrap();
+    let response = fixture
+        .client
+        .head(format!(
+            "{}/pypi/simple/..%2F..%2Fadmin/",
+            fixture.pkg_base_url
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert!(upstream.recorded_requests().await.is_empty());
+}
+
+#[tokio::test]
 async fn caches_artifacts_and_dedupes_misses() {
     let upstream = Upstream::new().await.unwrap();
     upstream

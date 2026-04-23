@@ -55,18 +55,26 @@ vampire_git_forwards_total{upstream="https://example.com/repo.git/info/refs?serv
 async fn pypi_real_e2e_cold_warm_concurrent() {
     let fixture = RealFixture::new().await.unwrap();
 
-    let cold_before = fetch_stats_snapshot(&fixture.management_base_url).await.unwrap();
+    let cold_before = fetch_stats_snapshot(&fixture.management_base_url)
+        .await
+        .unwrap();
     run_pip_install(&fixture.pkg_base_url, fixture.temp.path(), "cold-a")
         .await
         .unwrap();
-    let cold_after = fetch_stats_snapshot(&fixture.management_base_url).await.unwrap();
+    let cold_after = fetch_stats_snapshot(&fixture.management_base_url)
+        .await
+        .unwrap();
     assert_has_artifact_fetches(&snapshot_delta(&cold_before, &cold_after), "pypi cold");
 
-    let warm_before = fetch_stats_snapshot(&fixture.management_base_url).await.unwrap();
+    let warm_before = fetch_stats_snapshot(&fixture.management_base_url)
+        .await
+        .unwrap();
     run_pip_install(&fixture.pkg_base_url, fixture.temp.path(), "warm-a")
         .await
         .unwrap();
-    let warm_after = fetch_stats_snapshot(&fixture.management_base_url).await.unwrap();
+    let warm_after = fetch_stats_snapshot(&fixture.management_base_url)
+        .await
+        .unwrap();
     assert_no_artifact_fetches(&snapshot_delta(&warm_before, &warm_after), "pypi warm");
 
     let concurrent = RealFixture::new().await.unwrap();
@@ -100,18 +108,26 @@ async fn pypi_real_e2e_cold_warm_concurrent() {
 async fn npm_real_e2e_cold_warm_concurrent() {
     let fixture = RealFixture::new().await.unwrap();
 
-    let cold_before = fetch_stats_snapshot(&fixture.management_base_url).await.unwrap();
+    let cold_before = fetch_stats_snapshot(&fixture.management_base_url)
+        .await
+        .unwrap();
     run_npm_install(&fixture.pkg_base_url, fixture.temp.path(), "cold-a")
         .await
         .unwrap();
-    let cold_after = fetch_stats_snapshot(&fixture.management_base_url).await.unwrap();
+    let cold_after = fetch_stats_snapshot(&fixture.management_base_url)
+        .await
+        .unwrap();
     assert_has_artifact_fetches(&snapshot_delta(&cold_before, &cold_after), "npm cold");
 
-    let warm_before = fetch_stats_snapshot(&fixture.management_base_url).await.unwrap();
+    let warm_before = fetch_stats_snapshot(&fixture.management_base_url)
+        .await
+        .unwrap();
     run_npm_install(&fixture.pkg_base_url, fixture.temp.path(), "warm-a")
         .await
         .unwrap();
-    let warm_after = fetch_stats_snapshot(&fixture.management_base_url).await.unwrap();
+    let warm_after = fetch_stats_snapshot(&fixture.management_base_url)
+        .await
+        .unwrap();
     assert_no_artifact_fetches(&snapshot_delta(&warm_before, &warm_after), "npm warm");
 
     let concurrent = RealFixture::new().await.unwrap();
@@ -145,18 +161,26 @@ async fn npm_real_e2e_cold_warm_concurrent() {
 async fn cargo_real_e2e_cold_warm_concurrent() {
     let fixture = RealFixture::new().await.unwrap();
 
-    let cold_before = fetch_stats_snapshot(&fixture.management_base_url).await.unwrap();
+    let cold_before = fetch_stats_snapshot(&fixture.management_base_url)
+        .await
+        .unwrap();
     run_cargo_build(&fixture.pkg_base_url, fixture.temp.path(), "cold-a")
         .await
         .unwrap();
-    let cold_after = fetch_stats_snapshot(&fixture.management_base_url).await.unwrap();
+    let cold_after = fetch_stats_snapshot(&fixture.management_base_url)
+        .await
+        .unwrap();
     assert_has_artifact_fetches(&snapshot_delta(&cold_before, &cold_after), "cargo cold");
 
-    let warm_before = fetch_stats_snapshot(&fixture.management_base_url).await.unwrap();
+    let warm_before = fetch_stats_snapshot(&fixture.management_base_url)
+        .await
+        .unwrap();
     run_cargo_build(&fixture.pkg_base_url, fixture.temp.path(), "warm-a")
         .await
         .unwrap();
-    let warm_after = fetch_stats_snapshot(&fixture.management_base_url).await.unwrap();
+    let warm_after = fetch_stats_snapshot(&fixture.management_base_url)
+        .await
+        .unwrap();
     assert_no_artifact_fetches(&snapshot_delta(&warm_before, &warm_after), "cargo warm");
 
     let concurrent = RealFixture::new().await.unwrap();
@@ -190,11 +214,15 @@ async fn cargo_real_e2e_cold_warm_concurrent() {
 async fn github_git_real_e2e_clone_and_fetch_through_rewrite() {
     let fixture = RealFixture::new().await.unwrap();
 
-    let before = fetch_stats_snapshot(&fixture.management_base_url).await.unwrap();
+    let before = fetch_stats_snapshot(&fixture.management_base_url)
+        .await
+        .unwrap();
     run_git_clone_and_fetch(&fixture.git_base_url, fixture.temp.path(), "git-flow")
         .await
         .unwrap();
-    let after = fetch_stats_snapshot(&fixture.management_base_url).await.unwrap();
+    let after = fetch_stats_snapshot(&fixture.management_base_url)
+        .await
+        .unwrap();
     assert_has_git_forwards(&snapshot_delta(&before, &after), "git clone and fetch");
 }
 
@@ -202,7 +230,9 @@ async fn github_git_real_e2e_clone_and_fetch_through_rewrite() {
 #[ignore = "hits live PyPI and GitHub through the local proxy"]
 async fn pip_git_pinned_dependency_through_proxy() {
     let fixture = RealFixture::new().await.unwrap();
-    let before = fetch_stats_snapshot(&fixture.management_base_url).await.unwrap();
+    let before = fetch_stats_snapshot(&fixture.management_base_url)
+        .await
+        .unwrap();
     let run_dir = fixture.temp.path().join("pip-git");
     let target_dir = run_dir.join("site");
     fs::create_dir_all(&run_dir).await.unwrap();
@@ -247,7 +277,9 @@ async fn pip_git_pinned_dependency_through_proxy() {
     .await
     .unwrap();
     ensure_success("pip git dep validate", &validate).unwrap();
-    let after = fetch_stats_snapshot(&fixture.management_base_url).await.unwrap();
+    let after = fetch_stats_snapshot(&fixture.management_base_url)
+        .await
+        .unwrap();
     assert_has_git_forwards(&snapshot_delta(&before, &after), "pip git dep");
 }
 
@@ -255,7 +287,9 @@ async fn pip_git_pinned_dependency_through_proxy() {
 #[ignore = "hits live npm and GitHub through the local proxy"]
 async fn npm_git_pinned_dependency_through_proxy() {
     let fixture = RealFixture::new().await.unwrap();
-    let before = fetch_stats_snapshot(&fixture.management_base_url).await.unwrap();
+    let before = fetch_stats_snapshot(&fixture.management_base_url)
+        .await
+        .unwrap();
     let run_dir = fixture.temp.path().join("npm-git");
     let home_dir = run_dir.join("home");
     let cache_dir = run_dir.join("npm-cache");
@@ -314,7 +348,9 @@ async fn npm_git_pinned_dependency_through_proxy() {
     .await
     .unwrap();
     ensure_success("npm git dep validate", &validate).unwrap();
-    let after = fetch_stats_snapshot(&fixture.management_base_url).await.unwrap();
+    let after = fetch_stats_snapshot(&fixture.management_base_url)
+        .await
+        .unwrap();
     assert_has_git_forwards(&snapshot_delta(&before, &after), "npm git dep");
 }
 
@@ -322,7 +358,9 @@ async fn npm_git_pinned_dependency_through_proxy() {
 #[ignore = "hits live crates.io and GitHub through the local proxy"]
 async fn cargo_git_pinned_dependency_through_proxy() {
     let fixture = RealFixture::new().await.unwrap();
-    let before = fetch_stats_snapshot(&fixture.management_base_url).await.unwrap();
+    let before = fetch_stats_snapshot(&fixture.management_base_url)
+        .await
+        .unwrap();
     let run_dir = fixture.temp.path().join("cargo-git");
     let cargo_home = run_dir.join("cargo-home");
     let target_dir = run_dir.join("target");
@@ -379,7 +417,9 @@ test-pkgs = { git = "https://github.com/cwwarren/test-pkgs.git", tag = "v0.1.0" 
         .await
         .unwrap();
     ensure_success("cargo run git dep", &run).unwrap();
-    let after = fetch_stats_snapshot(&fixture.management_base_url).await.unwrap();
+    let after = fetch_stats_snapshot(&fixture.management_base_url)
+        .await
+        .unwrap();
     assert_has_git_forwards(&snapshot_delta(&before, &after), "cargo git dep");
 }
 
@@ -477,7 +517,11 @@ async fn wait_management_ready(management_base_url: &str) -> io::Result<()> {
     let client = Client::new();
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        match client.get(format!("{management_base_url}/stats")).send().await {
+        match client
+            .get(format!("{management_base_url}/stats"))
+            .send()
+            .await
+        {
             Ok(response) if response.status().is_success() => return Ok(()),
             _ if Instant::now() < deadline => sleep(Duration::from_millis(50)).await,
             Ok(response) => {
@@ -523,11 +567,9 @@ fn parse_stats_snapshot(body: &str) -> io::Result<StatsSnapshot> {
         let (name, labels) = sample
             .split_once("{upstream=\"")
             .ok_or_else(|| io::Error::other(format!("invalid stats labels: {sample}")))?;
-        let upstream = unescape_prometheus_label(
-            labels
-                .strip_suffix("\"}")
-                .ok_or_else(|| io::Error::other(format!("invalid stats label terminator: {sample}")))?,
-        )?;
+        let upstream = unescape_prometheus_label(labels.strip_suffix("\"}").ok_or_else(|| {
+            io::Error::other(format!("invalid stats label terminator: {sample}"))
+        })?)?;
         match name {
             "vampire_artifact_fetches_total" => {
                 snapshot.artifact_fetches.insert(upstream, count);

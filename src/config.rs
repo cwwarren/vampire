@@ -22,30 +22,21 @@ impl Config {
     }
 
     fn from_vars(var: impl Fn(&str) -> Option<String>) -> Result<Self, String> {
-        let pkg_bind = parse_bind(
-            &var,
-            "VAMPIRE_PKG_BIND",
-            "VAMPIRE_PKG_HOST",
-            "127.0.0.1",
-            "VAMPIRE_PKG_PORT",
-            8080,
-        )?;
-        let git_bind = parse_bind(
-            &var,
-            "VAMPIRE_GIT_BIND",
-            "VAMPIRE_GIT_HOST",
-            "127.0.0.1",
-            "VAMPIRE_GIT_PORT",
-            8081,
-        )?;
-        let management_bind = parse_bind(
-            &var,
-            "VAMPIRE_MANAGEMENT_BIND",
-            "VAMPIRE_MANAGEMENT_HOST",
-            "127.0.0.1",
-            "VAMPIRE_MANAGEMENT_PORT",
-            8082,
-        )?;
+        let pkg_bind = var("VAMPIRE_PKG_BIND")
+            .unwrap_or_else(|| "127.0.0.1:8080".to_owned())
+            .trim()
+            .parse()
+            .map_err(|error| format!("invalid VAMPIRE_PKG_BIND: {error}"))?;
+        let git_bind = var("VAMPIRE_GIT_BIND")
+            .unwrap_or_else(|| "127.0.0.1:8081".to_owned())
+            .trim()
+            .parse()
+            .map_err(|error| format!("invalid VAMPIRE_GIT_BIND: {error}"))?;
+        let management_bind = var("VAMPIRE_MANAGEMENT_BIND")
+            .unwrap_or_else(|| "127.0.0.1:8082".to_owned())
+            .trim()
+            .parse()
+            .map_err(|error| format!("invalid VAMPIRE_MANAGEMENT_BIND: {error}"))?;
         let public_base_url = var("VAMPIRE_PUBLIC_BASE_URL")
             .ok_or_else(|| "VAMPIRE_PUBLIC_BASE_URL is required".to_owned())
             .and_then(|value| parse_public_base_url(&value))?;
@@ -79,48 +70,6 @@ impl Config {
             upstream_timeout: Duration::from_millis(upstream_timeout_ms),
         })
     }
-}
-
-fn parse_bind(
-    var: &impl Fn(&str) -> Option<String>,
-    bind_key: &str,
-    host_key: &str,
-    default_host: &str,
-    port_key: &str,
-    default_port: u16,
-) -> Result<SocketAddr, String> {
-    if let Some(value) = var(bind_key) {
-        return value
-            .trim()
-            .parse()
-            .map_err(|error| format!("invalid {bind_key}: {error}"));
-    }
-    let host = var(host_key).unwrap_or_else(|| default_host.to_owned());
-    let port = var(port_key)
-        .unwrap_or_else(|| default_port.to_string())
-        .trim()
-        .parse::<u16>()
-        .map_err(|error| format!("invalid {port_key}: {error}"))?;
-    socket_addr_from_host_port(host_key, &host, port_key, port)
-}
-
-fn socket_addr_from_host_port(
-    host_key: &str,
-    host: &str,
-    port_key: &str,
-    port: u16,
-) -> Result<SocketAddr, String> {
-    let host = host.trim();
-    if host.is_empty() {
-        return Err(format!("invalid {host_key}: host must not be empty"));
-    }
-    let bind = if host.contains(':') && !host.starts_with('[') {
-        format!("[{host}]:{port}")
-    } else {
-        format!("{host}:{port}")
-    };
-    bind.parse()
-        .map_err(|error| format!("invalid {host_key}/{port_key}: {error}"))
 }
 
 fn parse_public_base_url(value: &str) -> Result<String, String> {
@@ -199,7 +148,7 @@ mod tests {
     }
 
     #[test]
-    fn host_and_port_overrides() {
+    fn ignores_legacy_host_and_port_vars() {
         let config = config_with(&[
             ("VAMPIRE_PKG_HOST", "0.0.0.0"),
             ("VAMPIRE_PKG_PORT", "9090"),
@@ -209,9 +158,9 @@ mod tests {
             ("VAMPIRE_MANAGEMENT_PORT", "9092"),
         ])
         .unwrap();
-        assert_eq!(config.pkg_bind, "0.0.0.0:9090".parse().unwrap());
-        assert_eq!(config.git_bind, "127.0.0.2:9091".parse().unwrap());
-        assert_eq!(config.management_bind, "127.0.0.3:9092".parse().unwrap());
+        assert_eq!(config.pkg_bind, "127.0.0.1:8080".parse().unwrap());
+        assert_eq!(config.git_bind, "127.0.0.1:8081".parse().unwrap());
+        assert_eq!(config.management_bind, "127.0.0.1:8082".parse().unwrap());
     }
 
     #[test]
@@ -244,7 +193,6 @@ mod tests {
         assert!(config_with(&[("VAMPIRE_PKG_BIND", "not-an-addr")]).is_err());
         assert!(config_with(&[("VAMPIRE_GIT_BIND", "still-not-an-addr")]).is_err());
         assert!(config_with(&[("VAMPIRE_MANAGEMENT_BIND", "bad-addr")]).is_err());
-        assert!(config_with(&[("VAMPIRE_PKG_PORT", "bad-port")]).is_err());
         assert!(config_with(&[("VAMPIRE_PUBLIC_BASE_URL", "ftp://mirror.example")]).is_err());
         assert!(config_with(&[("VAMPIRE_PUBLIC_BASE_URL", "https://mirror.example/pkg")]).is_err());
         assert!(config_with(&[("VAMPIRE_UPSTREAM_TIMEOUT_MS", "xyz")]).is_err());

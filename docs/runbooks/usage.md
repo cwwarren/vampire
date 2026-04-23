@@ -28,8 +28,7 @@ Container defaults:
 - Published tags are `latest` and `sha-<full git sha>`
 
 Listener configuration:
-- Each listener accepts either a single `*_BIND` socket address or split `*_HOST`/`*_PORT` variables.
-- `VAMPIRE_*_BIND` takes precedence when both styles are present.
+- Each listener uses a single `*_BIND` socket address.
 - Supported listener prefixes are `PKG`, `GIT`, and `MANAGEMENT`.
 
 ## Client Configuration

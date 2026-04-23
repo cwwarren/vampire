@@ -44,6 +44,20 @@ async fn main() -> io::Result<()> {
             return Err(error);
         }
     };
+    let management_listener = match TcpListener::bind(config.management_bind).await {
+        Ok(listener) => listener,
+        Err(error) => {
+            log_failure(
+                "startup_failed",
+                json!({
+                    "stage": "bind_management_listener",
+                    "bind": config.management_bind.to_string(),
+                    "error": error.to_string(),
+                }),
+            );
+            return Err(error);
+        }
+    };
     let app = match App::new(config).await {
         Ok(app) => app,
         Err(error) => {
@@ -54,5 +68,6 @@ async fn main() -> io::Result<()> {
             return Err(error);
         }
     };
-    app.serve(pkg_listener, git_listener).await
+    app.serve(pkg_listener, git_listener, management_listener)
+        .await
 }

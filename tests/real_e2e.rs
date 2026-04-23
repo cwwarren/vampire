@@ -11,23 +11,76 @@ use tokio::process::Command;
 use tokio::time::{Duration, Instant, sleep};
 use vampire::{App, Config, StatsSnapshot};
 
+#[test]
+fn parses_stats_snapshot_body() {
+    let snapshot = parse_stats_snapshot(
+        r#"# HELP vampire_artifact_fetches_total Number of upstream artifact GETs.
+# TYPE vampire_artifact_fetches_total counter
+vampire_artifact_fetches_total{upstream="https://example.com/a"} 2
+# HELP vampire_metadata_fetches_total Number of upstream metadata GETs.
+# TYPE vampire_metadata_fetches_total counter
+vampire_metadata_fetches_total{upstream="https://example.com/b"} 1
+# HELP vampire_artifact_joins_total Number of requests that joined an in-flight artifact fetch.
+# TYPE vampire_artifact_joins_total counter
+vampire_artifact_joins_total{upstream="https://example.com/a"} 1
+# HELP vampire_git_forwards_total Number of git requests forwarded upstream.
+# TYPE vampire_git_forwards_total counter
+vampire_git_forwards_total{upstream="https://example.com/repo.git/info/refs?service=git-upload-pack"} 3
+"#,
+    )
+    .unwrap();
+
+    assert_eq!(
+        snapshot.artifact_fetches.get("https://example.com/a"),
+        Some(&2)
+    );
+    assert_eq!(
+        snapshot.metadata_fetches.get("https://example.com/b"),
+        Some(&1)
+    );
+    assert_eq!(
+        snapshot.artifact_joins.get("https://example.com/a"),
+        Some(&1)
+    );
+    assert_eq!(
+        snapshot
+            .git_forwards
+            .get("https://example.com/repo.git/info/refs?service=git-upload-pack"),
+        Some(&3)
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "hits live package registries"]
 async fn pypi_real_e2e_cold_warm_concurrent() {
     let fixture = RealFixture::new().await.unwrap();
 
+    let cold_before = fetch_stats_snapshot(&fixture.management_base_url)
+        .await
+        .unwrap();
     run_pip_install(&fixture.pkg_base_url, fixture.temp.path(), "cold-a")
         .await
         .unwrap();
-    assert_has_artifact_fetches(&fixture.app.stats().snapshot(), "pypi cold");
+    let cold_after = fetch_stats_snapshot(&fixture.management_base_url)
+        .await
+        .unwrap();
+    assert_has_artifact_fetches(&snapshot_delta(&cold_before, &cold_after), "pypi cold");
 
-    fixture.app.stats().reset();
+    let warm_before = fetch_stats_snapshot(&fixture.management_base_url)
+        .await
+        .unwrap();
     run_pip_install(&fixture.pkg_base_url, fixture.temp.path(), "warm-a")
         .await
         .unwrap();
-    assert_no_artifact_fetches(&fixture.app.stats().snapshot(), "pypi warm");
+    let warm_after = fetch_stats_snapshot(&fixture.management_base_url)
+        .await
+        .unwrap();
+    assert_no_artifact_fetches(&snapshot_delta(&warm_before, &warm_after), "pypi warm");
 
     let concurrent = RealFixture::new().await.unwrap();
+    let concurrent_before = fetch_stats_snapshot(&concurrent.management_base_url)
+        .await
+        .unwrap();
     let first = run_pip_install(
         &concurrent.pkg_base_url,
         concurrent.temp.path(),
@@ -41,7 +94,13 @@ async fn pypi_real_e2e_cold_warm_concurrent() {
     let (first, second) = tokio::join!(first, second);
     first.unwrap();
     second.unwrap();
-    assert_no_duplicate_artifact_fetches(&concurrent.app.stats().snapshot(), "pypi concurrent");
+    let concurrent_after = fetch_stats_snapshot(&concurrent.management_base_url)
+        .await
+        .unwrap();
+    assert_no_duplicate_artifact_fetches(
+        &snapshot_delta(&concurrent_before, &concurrent_after),
+        "pypi concurrent",
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -49,18 +108,32 @@ async fn pypi_real_e2e_cold_warm_concurrent() {
 async fn npm_real_e2e_cold_warm_concurrent() {
     let fixture = RealFixture::new().await.unwrap();
 
+    let cold_before = fetch_stats_snapshot(&fixture.management_base_url)
+        .await
+        .unwrap();
     run_npm_install(&fixture.pkg_base_url, fixture.temp.path(), "cold-a")
         .await
         .unwrap();
-    assert_has_artifact_fetches(&fixture.app.stats().snapshot(), "npm cold");
+    let cold_after = fetch_stats_snapshot(&fixture.management_base_url)
+        .await
+        .unwrap();
+    assert_has_artifact_fetches(&snapshot_delta(&cold_before, &cold_after), "npm cold");
 
-    fixture.app.stats().reset();
+    let warm_before = fetch_stats_snapshot(&fixture.management_base_url)
+        .await
+        .unwrap();
     run_npm_install(&fixture.pkg_base_url, fixture.temp.path(), "warm-a")
         .await
         .unwrap();
-    assert_no_artifact_fetches(&fixture.app.stats().snapshot(), "npm warm");
+    let warm_after = fetch_stats_snapshot(&fixture.management_base_url)
+        .await
+        .unwrap();
+    assert_no_artifact_fetches(&snapshot_delta(&warm_before, &warm_after), "npm warm");
 
     let concurrent = RealFixture::new().await.unwrap();
+    let concurrent_before = fetch_stats_snapshot(&concurrent.management_base_url)
+        .await
+        .unwrap();
     let first = run_npm_install(
         &concurrent.pkg_base_url,
         concurrent.temp.path(),
@@ -74,7 +147,13 @@ async fn npm_real_e2e_cold_warm_concurrent() {
     let (first, second) = tokio::join!(first, second);
     first.unwrap();
     second.unwrap();
-    assert_no_duplicate_artifact_fetches(&concurrent.app.stats().snapshot(), "npm concurrent");
+    let concurrent_after = fetch_stats_snapshot(&concurrent.management_base_url)
+        .await
+        .unwrap();
+    assert_no_duplicate_artifact_fetches(
+        &snapshot_delta(&concurrent_before, &concurrent_after),
+        "npm concurrent",
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -82,18 +161,32 @@ async fn npm_real_e2e_cold_warm_concurrent() {
 async fn cargo_real_e2e_cold_warm_concurrent() {
     let fixture = RealFixture::new().await.unwrap();
 
+    let cold_before = fetch_stats_snapshot(&fixture.management_base_url)
+        .await
+        .unwrap();
     run_cargo_build(&fixture.pkg_base_url, fixture.temp.path(), "cold-a")
         .await
         .unwrap();
-    assert_has_artifact_fetches(&fixture.app.stats().snapshot(), "cargo cold");
+    let cold_after = fetch_stats_snapshot(&fixture.management_base_url)
+        .await
+        .unwrap();
+    assert_has_artifact_fetches(&snapshot_delta(&cold_before, &cold_after), "cargo cold");
 
-    fixture.app.stats().reset();
+    let warm_before = fetch_stats_snapshot(&fixture.management_base_url)
+        .await
+        .unwrap();
     run_cargo_build(&fixture.pkg_base_url, fixture.temp.path(), "warm-a")
         .await
         .unwrap();
-    assert_no_artifact_fetches(&fixture.app.stats().snapshot(), "cargo warm");
+    let warm_after = fetch_stats_snapshot(&fixture.management_base_url)
+        .await
+        .unwrap();
+    assert_no_artifact_fetches(&snapshot_delta(&warm_before, &warm_after), "cargo warm");
 
     let concurrent = RealFixture::new().await.unwrap();
+    let concurrent_before = fetch_stats_snapshot(&concurrent.management_base_url)
+        .await
+        .unwrap();
     let first = run_cargo_build(
         &concurrent.pkg_base_url,
         concurrent.temp.path(),
@@ -107,7 +200,13 @@ async fn cargo_real_e2e_cold_warm_concurrent() {
     let (first, second) = tokio::join!(first, second);
     first.unwrap();
     second.unwrap();
-    assert_no_duplicate_artifact_fetches(&concurrent.app.stats().snapshot(), "cargo concurrent");
+    let concurrent_after = fetch_stats_snapshot(&concurrent.management_base_url)
+        .await
+        .unwrap();
+    assert_no_duplicate_artifact_fetches(
+        &snapshot_delta(&concurrent_before, &concurrent_after),
+        "cargo concurrent",
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -115,16 +214,25 @@ async fn cargo_real_e2e_cold_warm_concurrent() {
 async fn github_git_real_e2e_clone_and_fetch_through_rewrite() {
     let fixture = RealFixture::new().await.unwrap();
 
+    let before = fetch_stats_snapshot(&fixture.management_base_url)
+        .await
+        .unwrap();
     run_git_clone_and_fetch(&fixture.git_base_url, fixture.temp.path(), "git-flow")
         .await
         .unwrap();
-    assert_has_git_forwards(&fixture.app.stats().snapshot(), "git clone and fetch");
+    let after = fetch_stats_snapshot(&fixture.management_base_url)
+        .await
+        .unwrap();
+    assert_has_git_forwards(&snapshot_delta(&before, &after), "git clone and fetch");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "hits live PyPI and GitHub through the local proxy"]
 async fn pip_git_pinned_dependency_through_proxy() {
     let fixture = RealFixture::new().await.unwrap();
+    let before = fetch_stats_snapshot(&fixture.management_base_url)
+        .await
+        .unwrap();
     let run_dir = fixture.temp.path().join("pip-git");
     let target_dir = run_dir.join("site");
     fs::create_dir_all(&run_dir).await.unwrap();
@@ -169,13 +277,19 @@ async fn pip_git_pinned_dependency_through_proxy() {
     .await
     .unwrap();
     ensure_success("pip git dep validate", &validate).unwrap();
-    assert_has_git_forwards(&fixture.app.stats().snapshot(), "pip git dep");
+    let after = fetch_stats_snapshot(&fixture.management_base_url)
+        .await
+        .unwrap();
+    assert_has_git_forwards(&snapshot_delta(&before, &after), "pip git dep");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "hits live npm and GitHub through the local proxy"]
 async fn npm_git_pinned_dependency_through_proxy() {
     let fixture = RealFixture::new().await.unwrap();
+    let before = fetch_stats_snapshot(&fixture.management_base_url)
+        .await
+        .unwrap();
     let run_dir = fixture.temp.path().join("npm-git");
     let home_dir = run_dir.join("home");
     let cache_dir = run_dir.join("npm-cache");
@@ -234,13 +348,19 @@ async fn npm_git_pinned_dependency_through_proxy() {
     .await
     .unwrap();
     ensure_success("npm git dep validate", &validate).unwrap();
-    assert_has_git_forwards(&fixture.app.stats().snapshot(), "npm git dep");
+    let after = fetch_stats_snapshot(&fixture.management_base_url)
+        .await
+        .unwrap();
+    assert_has_git_forwards(&snapshot_delta(&before, &after), "npm git dep");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "hits live crates.io and GitHub through the local proxy"]
 async fn cargo_git_pinned_dependency_through_proxy() {
     let fixture = RealFixture::new().await.unwrap();
+    let before = fetch_stats_snapshot(&fixture.management_base_url)
+        .await
+        .unwrap();
     let run_dir = fixture.temp.path().join("cargo-git");
     let cargo_home = run_dir.join("cargo-home");
     let target_dir = run_dir.join("target");
@@ -297,14 +417,17 @@ test-pkgs = { git = "https://github.com/cwwarren/test-pkgs.git", tag = "v0.1.0" 
         .await
         .unwrap();
     ensure_success("cargo run git dep", &run).unwrap();
-    assert_has_git_forwards(&fixture.app.stats().snapshot(), "cargo git dep");
+    let after = fetch_stats_snapshot(&fixture.management_base_url)
+        .await
+        .unwrap();
+    assert_has_git_forwards(&snapshot_delta(&before, &after), "cargo git dep");
 }
 
 struct RealFixture {
     temp: TempDir,
     pkg_base_url: String,
     git_base_url: String,
-    app: App,
+    management_base_url: String,
 }
 
 impl RealFixture {
@@ -314,11 +437,14 @@ impl RealFixture {
         fs::create_dir_all(&cache_dir).await?;
         let pkg_listener = TcpListener::bind("127.0.0.1:0").await?;
         let git_listener = TcpListener::bind("127.0.0.1:0").await?;
+        let management_listener = TcpListener::bind("127.0.0.1:0").await?;
         let pkg_bind = pkg_listener.local_addr()?;
         let git_bind = git_listener.local_addr()?;
+        let management_bind = management_listener.local_addr()?;
         let config = Config {
             pkg_bind,
             git_bind,
+            management_bind,
             public_base_url: format!("http://{pkg_bind}"),
             cache_dir,
             max_cache_size: 3 * (1 << 30),
@@ -328,17 +454,21 @@ impl RealFixture {
         let app = App::new(config).await?;
         let app_serve = app.clone();
         tokio::spawn(async move {
-            let _ = app_serve.serve(pkg_listener, git_listener).await;
+            let _ = app_serve
+                .serve(pkg_listener, git_listener, management_listener)
+                .await;
         });
         let pkg_base_url = format!("http://{pkg_bind}");
         let git_base_url = format!("http://{git_bind}");
+        let management_base_url = format!("http://{management_bind}");
         wait_ready(&pkg_base_url).await?;
         wait_git_ready(&git_base_url).await?;
+        wait_management_ready(&management_base_url).await?;
         Ok(Self {
             temp,
             pkg_base_url,
             git_base_url,
-            app,
+            management_base_url,
         })
     }
 }
@@ -381,6 +511,129 @@ async fn wait_git_ready(git_base_url: &str) -> io::Result<()> {
             Err(error) => return Err(io::Error::other(error)),
         }
     }
+}
+
+async fn wait_management_ready(management_base_url: &str) -> io::Result<()> {
+    let client = Client::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        match client
+            .get(format!("{management_base_url}/stats"))
+            .send()
+            .await
+        {
+            Ok(response) if response.status().is_success() => return Ok(()),
+            _ if Instant::now() < deadline => sleep(Duration::from_millis(50)).await,
+            Ok(response) => {
+                return Err(io::Error::other(format!(
+                    "management listener did not become ready: {}",
+                    response.status()
+                )));
+            }
+            Err(error) => return Err(io::Error::other(error)),
+        }
+    }
+}
+
+async fn fetch_stats_snapshot(management_base_url: &str) -> io::Result<StatsSnapshot> {
+    let response = Client::new()
+        .get(format!("{management_base_url}/stats"))
+        .send()
+        .await
+        .map_err(io::Error::other)?;
+    if !response.status().is_success() {
+        return Err(io::Error::other(format!(
+            "stats request failed: {}",
+            response.status()
+        )));
+    }
+    let body = response.text().await.map_err(io::Error::other)?;
+    parse_stats_snapshot(&body)
+}
+
+fn parse_stats_snapshot(body: &str) -> io::Result<StatsSnapshot> {
+    let mut snapshot = StatsSnapshot::default();
+    for line in body.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let (sample, value) = line
+            .rsplit_once(' ')
+            .ok_or_else(|| io::Error::other(format!("invalid stats sample: {line}")))?;
+        let count = value
+            .parse::<usize>()
+            .map_err(|error| io::Error::other(format!("invalid stats value {value:?}: {error}")))?;
+        let (name, labels) = sample
+            .split_once("{upstream=\"")
+            .ok_or_else(|| io::Error::other(format!("invalid stats labels: {sample}")))?;
+        let upstream = unescape_prometheus_label(labels.strip_suffix("\"}").ok_or_else(|| {
+            io::Error::other(format!("invalid stats label terminator: {sample}"))
+        })?)?;
+        match name {
+            "vampire_artifact_fetches_total" => {
+                snapshot.artifact_fetches.insert(upstream, count);
+            }
+            "vampire_metadata_fetches_total" => {
+                snapshot.metadata_fetches.insert(upstream, count);
+            }
+            "vampire_artifact_joins_total" => {
+                snapshot.artifact_joins.insert(upstream, count);
+            }
+            "vampire_git_forwards_total" => {
+                snapshot.git_forwards.insert(upstream, count);
+            }
+            _ => {}
+        }
+    }
+    Ok(snapshot)
+}
+
+fn unescape_prometheus_label(value: &str) -> io::Result<String> {
+    let mut out = String::with_capacity(value.len());
+    let mut chars = value.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            out.push(ch);
+            continue;
+        }
+        let escaped = chars
+            .next()
+            .ok_or_else(|| io::Error::other("unterminated prometheus escape"))?;
+        match escaped {
+            'n' => out.push('\n'),
+            '\\' => out.push('\\'),
+            '"' => out.push('"'),
+            other => {
+                return Err(io::Error::other(format!(
+                    "unsupported prometheus escape: \\{other}"
+                )));
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn snapshot_delta(before: &StatsSnapshot, after: &StatsSnapshot) -> StatsSnapshot {
+    StatsSnapshot {
+        artifact_fetches: diff_counters(&before.artifact_fetches, &after.artifact_fetches),
+        metadata_fetches: diff_counters(&before.metadata_fetches, &after.metadata_fetches),
+        artifact_joins: diff_counters(&before.artifact_joins, &after.artifact_joins),
+        git_forwards: diff_counters(&before.git_forwards, &after.git_forwards),
+    }
+}
+
+fn diff_counters(
+    before: &HashMap<String, usize>,
+    after: &HashMap<String, usize>,
+) -> HashMap<String, usize> {
+    after
+        .iter()
+        .filter_map(|(key, after_count)| {
+            let delta = after_count.saturating_sub(*before.get(key).unwrap_or(&0));
+            (delta > 0).then(|| (key.clone(), delta))
+        })
+        .collect()
 }
 
 async fn run_pip_install(base_url: &str, root: &Path, label: &str) -> io::Result<()> {

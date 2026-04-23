@@ -8,6 +8,7 @@ use url::Url;
 pub struct Config {
     pub pkg_bind: SocketAddr,
     pub git_bind: SocketAddr,
+    pub management_bind: SocketAddr,
     pub public_base_url: String,
     pub cache_dir: PathBuf,
     pub max_cache_size: u64,
@@ -23,12 +24,19 @@ impl Config {
     fn from_vars(var: impl Fn(&str) -> Option<String>) -> Result<Self, String> {
         let pkg_bind = var("VAMPIRE_PKG_BIND")
             .unwrap_or_else(|| "127.0.0.1:8080".to_owned())
+            .trim()
             .parse()
             .map_err(|error| format!("invalid VAMPIRE_PKG_BIND: {error}"))?;
         let git_bind = var("VAMPIRE_GIT_BIND")
             .unwrap_or_else(|| "127.0.0.1:8081".to_owned())
+            .trim()
             .parse()
             .map_err(|error| format!("invalid VAMPIRE_GIT_BIND: {error}"))?;
+        let management_bind = var("VAMPIRE_MANAGEMENT_BIND")
+            .unwrap_or_else(|| "127.0.0.1:8082".to_owned())
+            .trim()
+            .parse()
+            .map_err(|error| format!("invalid VAMPIRE_MANAGEMENT_BIND: {error}"))?;
         let public_base_url = var("VAMPIRE_PUBLIC_BASE_URL")
             .ok_or_else(|| "VAMPIRE_PUBLIC_BASE_URL is required".to_owned())
             .and_then(|value| parse_public_base_url(&value))?;
@@ -54,6 +62,7 @@ impl Config {
         Ok(Self {
             pkg_bind,
             git_bind,
+            management_bind,
             public_base_url,
             cache_dir,
             max_cache_size,
@@ -107,6 +116,7 @@ mod tests {
         let config = config_with(&[]).unwrap();
         assert_eq!(config.pkg_bind, "127.0.0.1:8080".parse().unwrap());
         assert_eq!(config.git_bind, "127.0.0.1:8081".parse().unwrap());
+        assert_eq!(config.management_bind, "127.0.0.1:8082".parse().unwrap());
         assert_eq!(config.public_base_url, "https://mirror.example");
         assert_eq!(config.cache_dir.to_str().unwrap(), "./.cache/vampire");
         assert_eq!(config.max_cache_size, 100_000_000);
@@ -115,10 +125,11 @@ mod tests {
     }
 
     #[test]
-    fn overrides() {
+    fn bind_overrides() {
         let config = config_with(&[
             ("VAMPIRE_PKG_BIND", "0.0.0.0:9090"),
             ("VAMPIRE_GIT_BIND", "0.0.0.0:9091"),
+            ("VAMPIRE_MANAGEMENT_BIND", "0.0.0.0:9092"),
             ("VAMPIRE_PUBLIC_BASE_URL", "https://mirror.example:8443/"),
             ("VAMPIRE_CACHE_DIR", "/tmp/cache"),
             ("VAMPIRE_MAX_CACHE_SIZE_MB", "5000"),
@@ -128,11 +139,28 @@ mod tests {
         .unwrap();
         assert_eq!(config.pkg_bind, "0.0.0.0:9090".parse().unwrap());
         assert_eq!(config.git_bind, "0.0.0.0:9091".parse().unwrap());
+        assert_eq!(config.management_bind, "0.0.0.0:9092".parse().unwrap());
         assert_eq!(config.public_base_url, "https://mirror.example:8443");
         assert_eq!(config.cache_dir.to_str().unwrap(), "/tmp/cache");
         assert_eq!(config.max_cache_size, 5_000_000_000);
         assert_eq!(config.max_upstream_fetches, 8);
         assert_eq!(config.upstream_timeout, Duration::from_mins(1));
+    }
+
+    #[test]
+    fn ignores_legacy_host_and_port_vars() {
+        let config = config_with(&[
+            ("VAMPIRE_PKG_HOST", "0.0.0.0"),
+            ("VAMPIRE_PKG_PORT", "9090"),
+            ("VAMPIRE_GIT_HOST", "127.0.0.2"),
+            ("VAMPIRE_GIT_PORT", "9091"),
+            ("VAMPIRE_MANAGEMENT_HOST", "127.0.0.3"),
+            ("VAMPIRE_MANAGEMENT_PORT", "9092"),
+        ])
+        .unwrap();
+        assert_eq!(config.pkg_bind, "127.0.0.1:8080".parse().unwrap());
+        assert_eq!(config.git_bind, "127.0.0.1:8081".parse().unwrap());
+        assert_eq!(config.management_bind, "127.0.0.1:8082".parse().unwrap());
     }
 
     #[test]
@@ -164,6 +192,7 @@ mod tests {
         assert!(config_with(&[("VAMPIRE_MAX_CACHE_SIZE_MB", "abc")]).is_err());
         assert!(config_with(&[("VAMPIRE_PKG_BIND", "not-an-addr")]).is_err());
         assert!(config_with(&[("VAMPIRE_GIT_BIND", "still-not-an-addr")]).is_err());
+        assert!(config_with(&[("VAMPIRE_MANAGEMENT_BIND", "bad-addr")]).is_err());
         assert!(config_with(&[("VAMPIRE_PUBLIC_BASE_URL", "ftp://mirror.example")]).is_err());
         assert!(config_with(&[("VAMPIRE_PUBLIC_BASE_URL", "https://mirror.example/pkg")]).is_err());
         assert!(config_with(&[("VAMPIRE_UPSTREAM_TIMEOUT_MS", "xyz")]).is_err());

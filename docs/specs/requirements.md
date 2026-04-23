@@ -26,11 +26,14 @@
 - Git listener on `VAMPIRE_GIT_BIND`:
 - `GET /{owner}/{repo}.git/info/refs?service=git-upload-pack`
 - `POST /{owner}/{repo}.git/git-upload-pack`
+- Management listener on `VAMPIRE_MANAGEMENT_BIND`:
+- `GET /stats`
 
 ## Container Image
 - Publish an official image to `ghcr.io/<repo-owner>/vampire`.
 - Container defaults set `VAMPIRE_PKG_BIND=0.0.0.0:8080`.
 - Container defaults set `VAMPIRE_GIT_BIND=0.0.0.0:8081`.
+- Container defaults set `VAMPIRE_MANAGEMENT_BIND=0.0.0.0:8082`.
 - Container defaults set `VAMPIRE_CACHE_DIR=/var/cache/vampire`.
 - `VAMPIRE_PUBLIC_BASE_URL` remains required at runtime and has no container default because it is deployment-specific.
 - Published tags are `latest` and `sha-<full git sha>`.
@@ -40,11 +43,14 @@
 - `VAMPIRE_MAX_CACHE_SIZE_MB` required
 - `VAMPIRE_PKG_BIND` default `127.0.0.1:8080`
 - `VAMPIRE_GIT_BIND` default `127.0.0.1:8081`
+- `VAMPIRE_MANAGEMENT_BIND` default `127.0.0.1:8082`
 - `VAMPIRE_CACHE_DIR` default `./.cache/vampire`
 - `VAMPIRE_MAX_UPSTREAM_FETCHES` default `32`
 - `VAMPIRE_UPSTREAM_TIMEOUT_MS` default `30000`
+- The management listener is unauthenticated; deployments should bind it only to trusted interfaces.
 
 ## Cache Rules
+- `/stats` is synthetic and never served from the disk cache.
 - Artifacts are cached by canonical upstream URL until evicted.
 - Cache coordination is in-process only. Sharing one cache directory across multiple vampire processes is unsupported.
 - Git proxy traffic is never persisted in the disk cache; accepted git reads always forward directly to GitHub.
@@ -53,7 +59,7 @@
 - Followers wait for the same completed result and then serve the committed file or the completed upstream error response.
 - Metadata is cached only when upstream returns `ETag` or `Last-Modified`.
 - Metadata fetches are not deduped. Concurrent cold metadata requests may fetch upstream independently and race to populate cache.
-- Cached metadata is published as a single atomic file so readers never observe mixed headers and body bytes.
+- All cache entries are published as a single atomic file so readers never observe mixed headers and body bytes.
 - Rewritten npm and PyPI metadata must not expose upstream `ETag` or `Last-Modified` to clients; those validators are only for vampire's own upstream revalidation.
 - HEAD responses must emit the same headers GET would emit for the same resource, including `Content-Length` on cold misses.
 - Eviction is oldest-first by completed file mtime.

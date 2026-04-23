@@ -1,6 +1,6 @@
 # Architecture
 
-Vampire is a single-process async Rust HTTP proxy that caches package artifacts and metadata for three registries: PyPI, npm, and Cargo. A second listener on the same process proxies read-only GitHub smart-HTTP traffic for git-pinned package dependencies. Built on tokio + axum + reqwest.
+Vampire is a single-process async Rust HTTP proxy that caches package artifacts and metadata for three registries: PyPI, npm, and Cargo. A second listener on the same process proxies read-only GitHub smart-HTTP traffic for git-pinned package dependencies, and a third management listener exposes Prometheus-formatted in-memory stats. Built on tokio + axum + reqwest.
 
 ## Module structure
 
@@ -55,7 +55,7 @@ Synchronization primitives within `CacheStore`:
 
 ### Routing
 
-`App::serve(pkg_listener, git_listener)` runs two Axum routers over the same shared `App` state.
+`App::serve(pkg_listener, git_listener, management_listener)` runs three Axum routers over the same shared `App` state.
 
 Package routes accept GET and HEAD on the package listener:
 
@@ -76,6 +76,12 @@ The git listener routes every request through the git handler. The git surface i
 |---|---|---|
 | `/{owner}/{repo}.git/info/refs?service=git-upload-pack` | git discovery | Forward to GitHub |
 | `/{owner}/{repo}.git/git-upload-pack` | git RPC | Forward to GitHub |
+
+The management listener is stats-only:
+
+| Path | Type | Handler |
+|---|---|---|
+| `/stats` | synthetic | Prometheus exposition for in-memory stats |
 
 Artifact routes for PyPI and npm encode the upstream path directly in the URL (e.g., `/pypi/files/packages/ab/cd/file.whl`). The proxy joins this path with the known upstream base URL. Path injection is prevented by `join_url`, which rejects absolute paths, `//` prefixes, and full URLs, then validates the resulting origin matches the base.
 
@@ -121,7 +127,7 @@ The background fetch (`run_artifact_fetch`):
 1. Acquire upstream semaphore permit
 2. GET upstream URL
 3. Stream response body to a `<key>.part` temp file
-4. Atomic rename: write `<key>.json` meta, rename `.part` to `<key>.body`
+4. Append footer (meta JSON + 4-byte length) to `.part`, atomic rename `.part` to `<key>`
 5. Signal `Inflight` as `Cached`
 6. Remove key from inflight map
 
@@ -164,32 +170,26 @@ Where `class` is the literal string `"artifact"` or `"metadata"`. First 2 hex ch
 ```
 <cache_dir>/
   <shard>/              # 2-char hex prefix (256 possible directories)
-    <key>.body          # response body (artifact: raw file; metadata: packed format)
-    <key>.json          # response metadata (artifact only)
+    <key>               # committed cache entry (packed: body + meta footer)
     <key>.part          # temp file during artifact fetch
     <key>.part.N.part   # temp file during metadata write (N = monotonic counter)
 ```
 
-### Artifact format (two files)
+### Packed entry format
 
-- `<key>.json` — `StoredResponseMeta` serialized as JSON: `{ headers, last_modified, etag, status }`
-- `<key>.body` — raw upstream response body (e.g., `.crate`, `.whl`, `.tgz`)
-
-Written in two steps: `fs::write` the `.json`, then `fs::rename` the `.part` to `.body`.
-
-### Metadata format (one file, packed)
-
-`<key>.body` contains:
+Artifacts and metadata share a single on-disk layout. `<key>` contains:
 
 ```
-[4 bytes: meta_len as big-endian u32]
-[meta_len bytes: StoredResponseMeta as JSON]
-[remaining bytes: response body]
+[body bytes:       offset 0 .. N]
+[meta JSON:        offset N .. N + M]
+[meta_len (u32 BE): offset N + M .. N + M + 4]
 ```
 
-For metadata entries, `StoredResponseMeta` carries both the headers returned to clients and the upstream validator fields vampire uses for conditional revalidation.
+Total file size is `N + M + 4`. `StoredResponseMeta` (`{ headers, last_modified, etag, status }`) carries both the headers returned to clients and the upstream validator fields vampire uses for conditional revalidation.
 
-Written atomically: pack into memory, write to a uniquely-suffixed `.part` temp file, then `fs::rename` to `.body`.
+Read: seek 4 bytes from end → `meta_len`, seek `4 + meta_len` from end, read `meta_len` bytes → meta JSON, body is `0 .. file_size - 4 - meta_len`. `meta_len` is rejected if it exceeds 1 MiB or the file size.
+
+Write for artifacts: the upstream body is streamed straight to `<key>.part`, then the meta JSON and 4-byte length are appended to the same `.part` and it is atomically renamed to `<key>`. Write for metadata: the full packed buffer is built in memory, written to a uniquely-suffixed `.part` temp file, then atomically renamed.
 
 ## Inflight dedup
 
@@ -232,16 +232,15 @@ The `notified()` future is created before locking to prevent lost wakeups. Outco
 
 ## Eviction
 
-At startup, `cleanup_stale_temps` walks the cache tree and deletes any `.part` files older than 5 minutes (remnants of interrupted fetches).
+At startup, `cleanup_stale_and_legacy` walks the cache tree, deletes any `.part` files older than 5 minutes (remnants of interrupted fetches), and unconditionally removes any leftover `<key>.json` and `<key>.body` files from the pre-unification split format.
 
 LRU-by-mtime eviction runs inline after every successful cache write (`store_metadata`, `commit_artifact`) and once at startup.
 
 Algorithm:
-1. Walk the entire cache directory tree, collecting all `.body` files
-2. For each, stat the sibling `.json` file to include its size
-3. Sum all sizes. If under `max_cache_size`, return
-4. Sort by mtime ascending (oldest first)
-5. Delete oldest entries (both `.body` and `.json`) until total is under the limit
+1. Walk the entire cache directory tree, collecting all extensionless `<key>` files
+2. Sum all sizes (each entry is a single file). If under `max_cache_size`, return
+3. Sort by mtime ascending (oldest first)
+4. Delete oldest entries until total is under the limit
 
 Metadata and artifact entries compete equally for space. There is no separate quota.
 
@@ -291,4 +290,4 @@ Events:
 - `artifact_joins` — incremented when a request deduplicates against an in-progress fetch
 - `git_forwards` — incremented per forwarded git request to GitHub
 
-Exposed via `App::stats() -> &AppStats` with `snapshot()` and `reset()` methods. No HTTP endpoint — used by integration tests to verify dedup behavior.
+Exposed via `App::stats() -> &AppStats` with `snapshot()`, `reset()`, and `render_prometheus()` methods. `/stats` on the management listener renders the current stats snapshot in Prometheus text exposition format with one sample per `(metric, upstream URL)` pair.

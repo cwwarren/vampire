@@ -102,7 +102,8 @@ impl App {
                 Ok(empty_response_from_meta(&meta))
             }
             rewrite => Ok(response_without_body(
-                self.fetch_metadata(upstream, upstream_type, rewrite, key).await?,
+                self.fetch_metadata(upstream, upstream_type, rewrite, key)
+                    .await?,
             )),
         }
     }
@@ -123,7 +124,8 @@ impl App {
             let body = entry.read_body().await?;
             return Ok(bytes_response(&entry.meta, body));
         }
-        self.fetch_metadata(upstream, upstream_type, rewrite, key).await
+        self.fetch_metadata(upstream, upstream_type, rewrite, key)
+            .await
     }
 
     async fn revalidate_metadata(
@@ -226,7 +228,8 @@ impl App {
     ) {
         let app = self.clone();
         tokio::spawn(async move {
-            app.run_artifact_fetch(upstream, upstream_type, leader).await;
+            app.run_artifact_fetch(upstream, upstream_type, leader)
+                .await;
         });
     }
 
@@ -263,7 +266,9 @@ impl App {
             temp_path: leader.paths.temp.clone(),
             armed: true,
         };
-        let result = self.do_artifact_fetch(&upstream, upstream_type, &leader).await;
+        let result = self
+            .do_artifact_fetch(&upstream, upstream_type, &leader)
+            .await;
         if result.is_err() {
             let _ = fs::remove_file(&leader.paths.temp).await;
         }

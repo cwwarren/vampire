@@ -553,9 +553,10 @@ fn parse_stats_snapshot(body: &str) -> io::Result<StatsSnapshot> {
         let (name, labels) = sample
             .split_once("{upstream=\"")
             .ok_or_else(|| io::Error::other(format!("invalid stats labels: {sample}")))?;
-        let upstream_str = unescape_prometheus_label(labels.strip_suffix("\"}").ok_or_else(|| {
-            io::Error::other(format!("invalid stats label terminator: {sample}"))
-        })?)?;
+        let upstream_str =
+            unescape_prometheus_label(labels.strip_suffix("\"}").ok_or_else(|| {
+                io::Error::other(format!("invalid stats label terminator: {sample}"))
+            })?)?;
         let upstream: &'static str = match upstream_str.as_str() {
             "pypi_files" => vampire::UPSTREAM_PYPI_FILES,
             "pypi_simple" => vampire::UPSTREAM_PYPI_SIMPLE,
@@ -564,9 +565,7 @@ fn parse_stats_snapshot(body: &str) -> io::Result<StatsSnapshot> {
             "cargo_index" => vampire::UPSTREAM_CARGO_INDEX,
             "github" => vampire::UPSTREAM_GITHUB,
             other => {
-                return Err(io::Error::other(format!(
-                    "unknown upstream type: {other}"
-                )));
+                return Err(io::Error::other(format!("unknown upstream type: {other}")));
             }
         };
         match name {

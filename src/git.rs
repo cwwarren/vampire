@@ -2,6 +2,7 @@ use crate::failure_log::log_failure;
 use crate::proxy::{is_hop_header, not_found, request_failed_response, simple_response};
 use crate::routes::{RegistryOrigins, join_url};
 use crate::state::App;
+use crate::stats::UPSTREAM_GITHUB;
 use axum::body::{Body, to_bytes};
 use axum::extract::{OriginalUri, State};
 use axum::http::header::CONTENT_TYPE;
@@ -57,7 +58,6 @@ impl App {
                 forwarded_headers.insert(name, value.clone());
             }
         }
-        let upstream_str = upstream.as_str().to_owned();
         let mut request = self
             .client()
             .request(method, upstream)
@@ -66,7 +66,7 @@ impl App {
             request = request.body(body);
         }
         let response = request.send().await.map_err(io::Error::other)?;
-        self.stats().record_git_forward(&upstream_str);
+        self.stats().record_git_forward(UPSTREAM_GITHUB);
         let status = response.status();
         let upstream_headers = response.headers().clone();
         let mut output = Response::new(Body::from_stream(response.bytes_stream()));

@@ -1,6 +1,7 @@
 use crate::proxy::{MetadataRewrite, request_failed_response};
 use crate::routes::{npm_packument_url, npm_tarball_url};
 use crate::state::App;
+use crate::stats::UPSTREAM_NPM;
 use axum::Router;
 use axum::extract::{OriginalUri, Path, State};
 use axum::http::Uri;
@@ -28,6 +29,7 @@ async fn npm_packument_get(State(app): State<App>, OriginalUri(uri): OriginalUri
     };
     app.handle_metadata(
         upstream,
+        UPSTREAM_NPM,
         MetadataRewrite::Npm(app.public_base_url().to_owned()),
     )
     .await
@@ -43,6 +45,7 @@ async fn npm_packument_head(State(app): State<App>, OriginalUri(uri): OriginalUr
     };
     app.handle_metadata_head(
         upstream,
+        UPSTREAM_NPM,
         MetadataRewrite::Npm(app.public_base_url().to_owned()),
     )
     .await
@@ -57,7 +60,7 @@ async fn npm_tarball_get(
     let Some(upstream) = npm_tarball_url(&path, app.upstreams()) else {
         return crate::proxy::not_found();
     };
-    app.handle_artifact(upstream)
+    app.handle_artifact(upstream, UPSTREAM_NPM)
         .await
         .unwrap_or_else(|error| request_failed_response("GET", &uri, &error))
 }

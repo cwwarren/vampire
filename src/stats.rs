@@ -2,6 +2,13 @@ use std::collections::HashMap;
 use std::fmt::Write;
 use std::sync::Mutex;
 
+pub const UPSTREAM_PYPI_FILES: &str = "pypi_files";
+pub const UPSTREAM_PYPI_SIMPLE: &str = "pypi_simple";
+pub const UPSTREAM_NPM: &str = "npm";
+pub const UPSTREAM_CARGO_DOWNLOAD: &str = "cargo_download";
+pub const UPSTREAM_CARGO_INDEX: &str = "cargo_index";
+pub const UPSTREAM_GITHUB: &str = "github";
+
 #[derive(Default)]
 pub struct AppStats {
     inner: Mutex<StatsSnapshot>,
@@ -9,37 +16,31 @@ pub struct AppStats {
 
 #[derive(Clone, Debug, Default)]
 pub struct StatsSnapshot {
-    pub artifact_fetches: HashMap<String, usize>,
-    pub metadata_fetches: HashMap<String, usize>,
-    pub artifact_joins: HashMap<String, usize>,
-    pub git_forwards: HashMap<String, usize>,
+    pub artifact_fetches: HashMap<&'static str, usize>,
+    pub metadata_fetches: HashMap<&'static str, usize>,
+    pub artifact_joins: HashMap<&'static str, usize>,
+    pub git_forwards: HashMap<&'static str, usize>,
 }
 
 impl AppStats {
-    pub fn record_artifact_fetch(&self, upstream: &str) {
+    pub fn record_artifact_fetch(&self, upstream: &'static str) {
         let mut inner = self.inner.lock().expect("stats mutex poisoned");
-        *inner
-            .artifact_fetches
-            .entry(upstream.to_owned())
-            .or_insert(0) += 1;
+        *inner.artifact_fetches.entry(upstream).or_insert(0) += 1;
     }
 
-    pub fn record_metadata_fetch(&self, upstream: &str) {
+    pub fn record_metadata_fetch(&self, upstream: &'static str) {
         let mut inner = self.inner.lock().expect("stats mutex poisoned");
-        *inner
-            .metadata_fetches
-            .entry(upstream.to_owned())
-            .or_insert(0) += 1;
+        *inner.metadata_fetches.entry(upstream).or_insert(0) += 1;
     }
 
-    pub fn record_artifact_join(&self, upstream: &str) {
+    pub fn record_artifact_join(&self, upstream: &'static str) {
         let mut inner = self.inner.lock().expect("stats mutex poisoned");
-        *inner.artifact_joins.entry(upstream.to_owned()).or_insert(0) += 1;
+        *inner.artifact_joins.entry(upstream).or_insert(0) += 1;
     }
 
-    pub fn record_git_forward(&self, upstream: &str) {
+    pub fn record_git_forward(&self, upstream: &'static str) {
         let mut inner = self.inner.lock().expect("stats mutex poisoned");
-        *inner.git_forwards.entry(upstream.to_owned()).or_insert(0) += 1;
+        *inner.git_forwards.entry(upstream).or_insert(0) += 1;
     }
 
     pub fn snapshot(&self) -> StatsSnapshot {
@@ -86,7 +87,12 @@ impl StatsSnapshot {
     }
 }
 
-fn write_counter_metric(out: &mut String, name: &str, help: &str, values: &HashMap<String, usize>) {
+fn write_counter_metric(
+    out: &mut String,
+    name: &str,
+    help: &str,
+    values: &HashMap<&'static str, usize>,
+) {
     let _ = writeln!(out, "# HELP {name} {help}");
     let _ = writeln!(out, "# TYPE {name} counter");
     let mut entries: Vec<_> = values.iter().collect();

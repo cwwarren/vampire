@@ -12,6 +12,7 @@ cargo run
 docker run --rm \
   -p 8080:8080 \
   -p 8081:8081 \
+  -p 8082:8082 \
   -v vampire-cache:/var/cache/vampire \
   -e VAMPIRE_PUBLIC_BASE_URL=http://127.0.0.1:8080 \
   -e VAMPIRE_MAX_CACHE_SIZE_MB=10000 \
@@ -21,9 +22,15 @@ docker run --rm \
 Container defaults:
 - `VAMPIRE_PKG_BIND=0.0.0.0:8080`
 - `VAMPIRE_GIT_BIND=0.0.0.0:8081`
+- `VAMPIRE_MANAGEMENT_BIND=0.0.0.0:8082`
 - `VAMPIRE_CACHE_DIR=/var/cache/vampire`
 - `VAMPIRE_PUBLIC_BASE_URL` has no default and must be set to the externally reachable package-listener origin
 - Published tags are `latest` and `sha-<full git sha>`
+
+Listener configuration:
+- Each listener accepts either a single `*_BIND` socket address or split `*_HOST`/`*_PORT` variables.
+- `VAMPIRE_*_BIND` takes precedence when both styles are present.
+- Supported listener prefixes are `PKG`, `GIT`, and `MANAGEMENT`.
 
 ## Client Configuration
 ```bash
@@ -121,11 +128,13 @@ Notes:
 - `npm` has other useful env-only toggles for sandboxes because every documented config key can be set through `NPM_CONFIG_*`.
 
 ## Operational Notes
+- Scrape Prometheus metrics from `GET /stats` on the management listener. The endpoint is synthetic, uncached, and exposes the in-memory `artifact_fetches`, `metadata_fetches`, `artifact_joins`, and `git_forwards` counters keyed by upstream URL.
+- The management listener is unauthenticated. Leave it on loopback or another trusted internal interface unless you deliberately want to expose operational metadata.
 - One vampire process must own a cache directory.
 - `*.part` files are in-flight downloads and are cleaned on startup if stale.
 - Artifact misses are single-flight per cache key. Vampire waits for the full upstream artifact before replying, then serves the committed file.
 - Metadata cache fill is best-effort. Concurrent cold metadata requests can fetch upstream in parallel and race to populate cache.
-- Cached metadata is committed as one file, so readers do not see mixed metadata headers and body bytes during revalidation.
+- All cache entries are committed as one file, so readers never see mixed headers and body bytes.
 - Rewritten npm and PyPI metadata omit upstream `ETag` and `Last-Modified` in client responses; vampire keeps those validators only for its own upstream revalidation.
 - HEAD responses mirror GET headers. On cold rewritten npm/PyPI metadata requests, vampire performs the normal fetch-and-rewrite path so `Content-Length` matches the eventual GET response.
 - The cache bound is soft during a successful commit and enforced immediately after the write finishes.

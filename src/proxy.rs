@@ -1,6 +1,6 @@
 use crate::cache::{
-    ArtifactLeader, ArtifactLookup, CacheStore, Inflight, InflightOutcome, StoredArtifact,
-    StoredMetadata, StoredResponseMeta,
+    ArtifactLeader, ArtifactLookup, CacheStore, Inflight, InflightOutcome, StoredEntry,
+    StoredResponseMeta,
 };
 use crate::failure_log::log_failure;
 use crate::routes::{rewrite_npm_json, rewrite_pypi_html};
@@ -15,7 +15,7 @@ use serde_json::json;
 use std::io;
 use std::sync::Arc;
 use tokio::fs;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::io::ReaderStream;
 
 #[derive(Clone)]
@@ -67,7 +67,7 @@ impl App {
         upstream: reqwest::Url,
     ) -> io::Result<Response> {
         let key = CacheStore::artifact_key(upstream.as_str());
-        if let Some(entry) = self.cache().load_artifact(&key).await? {
+        if let Some(entry) = self.cache().load(&key).await? {
             return Ok(empty_response_from_meta(&entry.meta));
         }
         let response = self
@@ -86,7 +86,7 @@ impl App {
         rewrite: MetadataRewrite,
     ) -> io::Result<Response> {
         let key = CacheStore::metadata_key(upstream.as_str());
-        if let Some(entry) = self.cache().load_metadata(&key).await? {
+        if let Some(entry) = self.cache().load(&key).await? {
             return Ok(empty_response_from_meta(&entry.meta));
         }
         match rewrite {
@@ -112,13 +112,14 @@ impl App {
         rewrite: MetadataRewrite,
     ) -> io::Result<Response> {
         let key = CacheStore::metadata_key(upstream.as_str());
-        if let Some(entry) = self.cache().load_metadata(&key).await? {
+        if let Some(entry) = self.cache().load(&key).await? {
             if entry.meta.etag.is_some() || entry.meta.last_modified.is_some() {
                 return self
                     .revalidate_metadata(upstream, rewrite, key, entry)
                     .await;
             }
-            return Ok(bytes_response(&entry.meta, entry.body));
+            let body = entry.read_body().await?;
+            return Ok(bytes_response(&entry.meta, body));
         }
         self.fetch_metadata(upstream, rewrite, key).await
     }
@@ -128,7 +129,7 @@ impl App {
         upstream: reqwest::Url,
         rewrite: MetadataRewrite,
         key: String,
-        entry: StoredMetadata,
+        entry: StoredEntry,
     ) -> io::Result<Response> {
         let mut request = self.client().get(upstream.clone());
         self.stats().record_metadata_fetch(upstream.as_str());
@@ -140,7 +141,8 @@ impl App {
         }
         let response = request.send().await.map_err(io::Error::other)?;
         if response.status() == StatusCode::NOT_MODIFIED {
-            return Ok(bytes_response(&entry.meta, entry.body));
+            let body = entry.read_body().await?;
+            return Ok(bytes_response(&entry.meta, body));
         }
         self.finish_metadata(rewrite, key, response).await
     }
@@ -187,8 +189,7 @@ impl App {
             expose_upstream_validators,
         );
         if status == StatusCode::OK && (meta.etag.is_some() || meta.last_modified.is_some()) {
-            let entry = self.cache().store_metadata(&key, &rewritten, &meta).await?;
-            return Ok(bytes_response(&entry.meta, entry.body));
+            self.cache().store_metadata(&key, &rewritten, &meta).await?;
         }
         Ok(bytes_response(&meta, Bytes::from(rewritten)))
     }
@@ -219,7 +220,7 @@ impl App {
     async fn serve_inflight(&self, key: &str, inflight: Arc<Inflight>) -> io::Result<Response> {
         match inflight.wait_for_outcome().await? {
             InflightOutcome::Cached => {
-                let entry = self.cache().load_artifact(key).await?.ok_or_else(|| {
+                let entry = self.cache().load(key).await?.ok_or_else(|| {
                     io::Error::new(
                         io::ErrorKind::NotFound,
                         "artifact missing after inflight completion",
@@ -455,9 +456,10 @@ fn strip_header(headers: &mut Vec<(String, String)>, name: &str) {
     headers.retain(|(header_name, _)| !header_name.eq_ignore_ascii_case(name));
 }
 
-async fn file_response(entry: StoredArtifact) -> io::Result<Response> {
-    let file = fs::File::open(entry.body_path).await?;
-    let mut response = Response::new(Body::from_stream(ReaderStream::new(file)));
+async fn file_response(entry: StoredEntry) -> io::Result<Response> {
+    let file = fs::File::open(&entry.body_path).await?;
+    let reader = file.take(entry.body_len);
+    let mut response = Response::new(Body::from_stream(ReaderStream::new(reader)));
     *response.status_mut() = StatusCode::from_u16(entry.meta.status).unwrap_or(StatusCode::OK);
     apply_headers(response.headers_mut(), &entry.meta.headers);
     Ok(response)
@@ -521,6 +523,7 @@ mod tests {
         let config = Config {
             pkg_bind: "127.0.0.1:0".parse().unwrap(),
             git_bind: "127.0.0.1:0".parse().unwrap(),
+            management_bind: "127.0.0.1:0".parse().unwrap(),
             public_base_url: "http://127.0.0.1:8080".to_owned(),
             cache_dir: PathBuf::from(temp.path()),
             max_cache_size: 16 * 1024 * 1024,
@@ -576,6 +579,50 @@ mod tests {
             ArtifactLookup::Join(_) => panic!("stale inflight entry remained after abort"),
             ArtifactLookup::Hit(_) => panic!("unexpected cached artifact after abort"),
         }
+    }
+
+    #[tokio::test]
+    async fn file_response_stops_at_footer() {
+        use crate::cache::{CacheStore, StoredResponseMeta};
+        let temp = tempdir().unwrap();
+        let config = Config {
+            pkg_bind: "127.0.0.1:0".parse().unwrap(),
+            git_bind: "127.0.0.1:0".parse().unwrap(),
+            management_bind: "127.0.0.1:0".parse().unwrap(),
+            public_base_url: "http://127.0.0.1:8080".to_owned(),
+            cache_dir: PathBuf::from(temp.path()),
+            max_cache_size: 16 * 1024 * 1024,
+            max_upstream_fetches: 4,
+            upstream_timeout: Duration::from_secs(5),
+        };
+        let store = CacheStore::new(&config).await.unwrap();
+        let key = CacheStore::artifact_key("https://example.com/pkg.tar.gz");
+        let paths = store.paths_for(&key);
+        tokio::fs::create_dir_all(paths.temp.parent().unwrap())
+            .await
+            .unwrap();
+        let body_bytes = b"important body bytes";
+        tokio::fs::write(&paths.temp, body_bytes).await.unwrap();
+        let meta = StoredResponseMeta {
+            headers: vec![(
+                "content-type".to_owned(),
+                "application/octet-stream".to_owned(),
+            )],
+            last_modified: None,
+            etag: None,
+            status: 200,
+        };
+        store
+            .commit_artifact(&key, &meta, &paths.temp)
+            .await
+            .unwrap();
+        let entry = store.load(&key).await.unwrap().unwrap();
+        assert_eq!(entry.body_len, body_bytes.len() as u64);
+        let response = super::file_response(entry).await.unwrap();
+        let body = axum::body::to_bytes(response.into_body(), 65536)
+            .await
+            .unwrap();
+        assert_eq!(body.as_ref(), body_bytes);
     }
 
     async fn slow_upstream(started: Arc<Notify>) -> io::Result<std::net::SocketAddr> {

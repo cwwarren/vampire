@@ -35,6 +35,117 @@ async fn rejects_unknown_routes() {
 }
 
 #[tokio::test]
+async fn serves_prometheus_stats_on_dedicated_management_listener() {
+    let upstream = Upstream::new().await.unwrap();
+    upstream
+        .insert(
+            "/simple/pkg/",
+            UpstreamResponse::text(200, "text/html", r#"<a href="pkg-1.0.0.tar.gz">pkg</a>"#),
+        )
+        .await;
+    upstream
+        .insert(
+            "/crates/demo/demo-1.0.0.crate",
+            UpstreamResponse::slow_bytes(
+                200,
+                "application/octet-stream",
+                vec![b'a'; 16 * 1024],
+                vec![b'b'; 16 * 1024],
+                Duration::from_millis(200),
+            ),
+        )
+        .await;
+    upstream
+        .insert(
+            "/rust-lang/cargo.git/info/refs",
+            UpstreamResponse::text(200, "application/x-git-upload-pack-advertisement", "ok"),
+        )
+        .await;
+    let fixture = TestFixture::with_servers(upstream.clone()).await.unwrap();
+
+    let metadata = fixture
+        .client
+        .get(format!("{}/pypi/simple/pkg/", fixture.pkg_base_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(metadata.status(), StatusCode::OK);
+
+    let artifact_url = format!(
+        "{}/cargo/api/v1/crates/demo/1.0.0/download",
+        fixture.pkg_base_url
+    );
+    let artifact_responses =
+        join_all((0..2).map(|_| fixture.client.get(&artifact_url).send())).await;
+    for response in artifact_responses {
+        assert_eq!(response.unwrap().status(), StatusCode::OK);
+    }
+
+    let git = fixture
+        .client
+        .get(format!(
+            "{}/rust-lang/cargo.git/info/refs?service=git-upload-pack",
+            fixture.git_base_url
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(git.status(), StatusCode::OK);
+
+    let stats_on_pkg_port = fixture
+        .client
+        .get(format!("{}/stats", fixture.pkg_base_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stats_on_pkg_port.status(), StatusCode::NOT_FOUND);
+
+    let stats_on_git_port = fixture
+        .client
+        .get(format!("{}/stats", fixture.git_base_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stats_on_git_port.status(), StatusCode::NOT_FOUND);
+
+    let response = fixture
+        .client
+        .get(format!("{}/stats", fixture.management_base_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok()),
+        Some("text/plain; version=0.0.4; charset=utf-8")
+    );
+    let body = response.text().await.unwrap();
+    assert!(
+        body.contains("# HELP vampire_artifact_fetches_total Number of upstream artifact GETs.")
+    );
+    assert!(body.contains("# TYPE vampire_artifact_fetches_total counter"));
+    assert!(body.contains(&format!(
+        "vampire_artifact_fetches_total{{upstream=\"http://{}/crates/demo/demo-1.0.0.crate\"}} 1",
+        upstream.addr
+    )));
+    assert!(body.contains(&format!(
+        "vampire_artifact_joins_total{{upstream=\"http://{}/crates/demo/demo-1.0.0.crate\"}} 1",
+        upstream.addr
+    )));
+    assert!(body.contains(&format!(
+        "vampire_metadata_fetches_total{{upstream=\"http://{}/simple/pkg/\"}} 1",
+        upstream.addr
+    )));
+    assert!(body.contains(&format!(
+        "vampire_git_forwards_total{{upstream=\"http://{}/rust-lang/cargo.git/info/refs?service=git-upload-pack\"}} 1",
+        upstream.addr
+    )));
+}
+
+#[tokio::test]
 async fn rewrites_pypi_links() {
     let upstream = Upstream::new().await.unwrap();
     upstream
@@ -1052,6 +1163,7 @@ struct TestFixture {
     git_bind: SocketAddr,
     pkg_base_url: String,
     git_base_url: String,
+    management_base_url: String,
     public_base_url: String,
     client: Client,
 }
@@ -1074,9 +1186,11 @@ impl TestFixture {
     ) -> io::Result<Self> {
         let temp_dir = tempfile::tempdir()?;
         let git_bind = listen_addr().await?;
+        let management_bind = listen_addr().await?;
         let config = Config {
             pkg_bind,
             git_bind,
+            management_bind,
             public_base_url: public_base_url.clone(),
             cache_dir: PathBuf::from(temp_dir.path()),
             max_cache_size: 32 * 1024 * 1024,
@@ -1103,14 +1217,18 @@ impl TestFixture {
         let app = App::new_with_upstreams(config.clone(), client.clone(), upstreams).await?;
         let pkg_listener = TcpListener::bind(pkg_bind).await?;
         let git_listener = TcpListener::bind(git_bind).await?;
+        let management_listener = TcpListener::bind(management_bind).await?;
         tokio::spawn(async move {
-            let _ = app.serve(pkg_listener, git_listener).await;
+            let _ = app
+                .serve(pkg_listener, git_listener, management_listener)
+                .await;
         });
         Ok(Self {
             _temp_dir: temp_dir,
             git_bind: config.git_bind,
             pkg_base_url: format!("http://{}", config.pkg_bind),
             git_base_url: format!("http://{}", config.git_bind),
+            management_base_url: format!("http://{}", config.management_bind),
             public_base_url,
             client,
         })

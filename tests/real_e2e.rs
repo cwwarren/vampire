@@ -629,7 +629,7 @@ fn diff_counters(
         .iter()
         .filter_map(|(key, after_count)| {
             let delta = after_count.saturating_sub(*before.get(key).unwrap_or(&0));
-            (delta > 0).then(|| (*key, delta))
+            (delta > 0).then_some((*key, delta))
         })
         .collect()
 }

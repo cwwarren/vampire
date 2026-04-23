@@ -35,6 +35,7 @@ async fn rejects_unknown_routes() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn serves_prometheus_stats_on_dedicated_management_listener() {
     let upstream = Upstream::new().await.unwrap();
     upstream

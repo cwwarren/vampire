@@ -90,7 +90,7 @@ fn write_counter_metric(out: &mut String, name: &str, help: &str, values: &HashM
     let _ = writeln!(out, "# HELP {name} {help}");
     let _ = writeln!(out, "# TYPE {name} counter");
     let mut entries: Vec<_> = values.iter().collect();
-    entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+    entries.sort_by_key(|(upstream, _)| *upstream);
     for (upstream, count) in entries {
         let _ = writeln!(
             out,

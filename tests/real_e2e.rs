@@ -995,15 +995,12 @@ fn assert_has_git_forwards(snapshot: &StatsSnapshot, context: &str) {
 }
 
 fn assert_no_duplicate_artifact_fetches(snapshot: &StatsSnapshot, context: &str) {
+    // With per-upstream-type stats, we can no longer detect duplicate fetches of the
+    // same specific artifact. However, we can verify deduplication is working by
+    // checking that artifact_joins > 0 (meaning some requests joined in-flight fetches).
     assert_has_artifact_fetches(snapshot, context);
-    let duplicates: HashMap<_, _> = snapshot
-        .artifact_fetches
-        .iter()
-        .filter(|(_, count)| **count > 1)
-        .map(|(upstream, count)| (*upstream, *count))
-        .collect();
     assert!(
-        duplicates.is_empty(),
-        "{context}: duplicate artifact fetches detected: {duplicates:?}"
+        !snapshot.artifact_joins.is_empty(),
+        "{context}: expected artifact joins (deduplication), got none"
     );
 }

@@ -284,10 +284,12 @@ Events:
 
 ## Stats
 
-`AppStats` tracks four counters, all keyed by upstream URL string:
+`AppStats` tracks four counters, all keyed by upstream type (six fixed values):
 - `artifact_fetches` — incremented per upstream artifact GET
 - `metadata_fetches` — incremented per upstream metadata GET (including revalidation)
 - `artifact_joins` — incremented when a request deduplicates against an in-progress fetch
 - `git_forwards` — incremented per forwarded git request to GitHub
 
-Exposed via `App::stats() -> &AppStats` with `snapshot()`, `reset()`, and `render_prometheus()` methods. `/stats` on the management listener renders the current stats snapshot in Prometheus text exposition format with one sample per `(metric, upstream URL)` pair.
+Upstream types: `pypi_files`, `pypi_simple`, `npm`, `cargo_download`, `cargo_index`, `github`.
+
+Exposed via `App::stats() -> &AppStats` with `snapshot()`, `reset()`, and `render_prometheus()` methods. `/stats` on the management listener renders the current stats snapshot in Prometheus text exposition format with one sample per `(metric, upstream type)` pair, bounding cardinality to 24 time series max (4 metrics × 6 upstreams).

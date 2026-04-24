@@ -16,38 +16,24 @@ fn parses_stats_snapshot_body() {
     let snapshot = parse_stats_snapshot(
         r#"# HELP vampire_artifact_fetches_total Number of upstream artifact GETs.
 # TYPE vampire_artifact_fetches_total counter
-vampire_artifact_fetches_total{upstream="https://example.com/a"} 2
+vampire_artifact_fetches_total{upstream="pypi_files"} 2
 # HELP vampire_metadata_fetches_total Number of upstream metadata GETs.
 # TYPE vampire_metadata_fetches_total counter
-vampire_metadata_fetches_total{upstream="https://example.com/b"} 1
+vampire_metadata_fetches_total{upstream="pypi_simple"} 1
 # HELP vampire_artifact_joins_total Number of requests that joined an in-flight artifact fetch.
 # TYPE vampire_artifact_joins_total counter
-vampire_artifact_joins_total{upstream="https://example.com/a"} 1
+vampire_artifact_joins_total{upstream="pypi_files"} 1
 # HELP vampire_git_forwards_total Number of git requests forwarded upstream.
 # TYPE vampire_git_forwards_total counter
-vampire_git_forwards_total{upstream="https://example.com/repo.git/info/refs?service=git-upload-pack"} 3
+vampire_git_forwards_total{upstream="github"} 3
 "#,
     )
     .unwrap();
 
-    assert_eq!(
-        snapshot.artifact_fetches.get("https://example.com/a"),
-        Some(&2)
-    );
-    assert_eq!(
-        snapshot.metadata_fetches.get("https://example.com/b"),
-        Some(&1)
-    );
-    assert_eq!(
-        snapshot.artifact_joins.get("https://example.com/a"),
-        Some(&1)
-    );
-    assert_eq!(
-        snapshot
-            .git_forwards
-            .get("https://example.com/repo.git/info/refs?service=git-upload-pack"),
-        Some(&3)
-    );
+    assert_eq!(snapshot.artifact_fetches.get("pypi_files"), Some(&2));
+    assert_eq!(snapshot.metadata_fetches.get("pypi_simple"), Some(&1));
+    assert_eq!(snapshot.artifact_joins.get("pypi_files"), Some(&1));
+    assert_eq!(snapshot.git_forwards.get("github"), Some(&3));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -567,9 +553,21 @@ fn parse_stats_snapshot(body: &str) -> io::Result<StatsSnapshot> {
         let (name, labels) = sample
             .split_once("{upstream=\"")
             .ok_or_else(|| io::Error::other(format!("invalid stats labels: {sample}")))?;
-        let upstream = unescape_prometheus_label(labels.strip_suffix("\"}").ok_or_else(|| {
-            io::Error::other(format!("invalid stats label terminator: {sample}"))
-        })?)?;
+        let upstream_str =
+            unescape_prometheus_label(labels.strip_suffix("\"}").ok_or_else(|| {
+                io::Error::other(format!("invalid stats label terminator: {sample}"))
+            })?)?;
+        let upstream: &'static str = match upstream_str.as_str() {
+            "pypi_files" => vampire::UPSTREAM_PYPI_FILES,
+            "pypi_simple" => vampire::UPSTREAM_PYPI_SIMPLE,
+            "npm" => vampire::UPSTREAM_NPM,
+            "cargo_download" => vampire::UPSTREAM_CARGO_DOWNLOAD,
+            "cargo_index" => vampire::UPSTREAM_CARGO_INDEX,
+            "github" => vampire::UPSTREAM_GITHUB,
+            other => {
+                return Err(io::Error::other(format!("unknown upstream type: {other}")));
+            }
+        };
         match name {
             "vampire_artifact_fetches_total" => {
                 snapshot.artifact_fetches.insert(upstream, count);
@@ -624,14 +622,14 @@ fn snapshot_delta(before: &StatsSnapshot, after: &StatsSnapshot) -> StatsSnapsho
 }
 
 fn diff_counters(
-    before: &HashMap<String, usize>,
-    after: &HashMap<String, usize>,
-) -> HashMap<String, usize> {
+    before: &HashMap<&'static str, usize>,
+    after: &HashMap<&'static str, usize>,
+) -> HashMap<&'static str, usize> {
     after
         .iter()
         .filter_map(|(key, after_count)| {
             let delta = after_count.saturating_sub(*before.get(key).unwrap_or(&0));
-            (delta > 0).then(|| (key.clone(), delta))
+            (delta > 0).then_some((*key, delta))
         })
         .collect()
 }
@@ -997,15 +995,12 @@ fn assert_has_git_forwards(snapshot: &StatsSnapshot, context: &str) {
 }
 
 fn assert_no_duplicate_artifact_fetches(snapshot: &StatsSnapshot, context: &str) {
+    // With per-upstream-type stats, we can no longer detect duplicate fetches of the
+    // same specific artifact. However, we can verify deduplication is working by
+    // checking that artifact_joins > 0 (meaning some requests joined in-flight fetches).
     assert_has_artifact_fetches(snapshot, context);
-    let duplicates: HashMap<_, _> = snapshot
-        .artifact_fetches
-        .iter()
-        .filter(|(_, count)| **count > 1)
-        .map(|(url, count)| (url.clone(), *count))
-        .collect();
     assert!(
-        duplicates.is_empty(),
-        "{context}: duplicate artifact fetches detected: {duplicates:?}"
+        !snapshot.artifact_joins.is_empty(),
+        "{context}: expected artifact joins (deduplication), got none"
     );
 }

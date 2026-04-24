@@ -128,22 +128,10 @@ async fn serves_prometheus_stats_on_dedicated_management_listener() {
         body.contains("# HELP vampire_artifact_fetches_total Number of upstream artifact GETs.")
     );
     assert!(body.contains("# TYPE vampire_artifact_fetches_total counter"));
-    assert!(body.contains(&format!(
-        "vampire_artifact_fetches_total{{upstream=\"http://{}/crates/demo/demo-1.0.0.crate\"}} 1",
-        upstream.addr
-    )));
-    assert!(body.contains(&format!(
-        "vampire_artifact_joins_total{{upstream=\"http://{}/crates/demo/demo-1.0.0.crate\"}} 1",
-        upstream.addr
-    )));
-    assert!(body.contains(&format!(
-        "vampire_metadata_fetches_total{{upstream=\"http://{}/simple/pkg/\"}} 1",
-        upstream.addr
-    )));
-    assert!(body.contains(&format!(
-        "vampire_git_forwards_total{{upstream=\"http://{}/rust-lang/cargo.git/info/refs?service=git-upload-pack\"}} 1",
-        upstream.addr
-    )));
+    assert!(body.contains("vampire_artifact_fetches_total{upstream=\"cargo_download\"} 1"));
+    assert!(body.contains("vampire_artifact_joins_total{upstream=\"cargo_download\"} 1"));
+    assert!(body.contains("vampire_metadata_fetches_total{upstream=\"pypi_simple\"} 1"));
+    assert!(body.contains("vampire_git_forwards_total{upstream=\"github\"} 1"));
 }
 
 #[tokio::test]

@@ -1,6 +1,7 @@
 use crate::proxy::{MetadataRewrite, request_failed_response};
 use crate::routes::{pypi_file_url, pypi_simple_url};
 use crate::state::App;
+use crate::stats::{UPSTREAM_PYPI_FILES, UPSTREAM_PYPI_SIMPLE};
 use axum::Router;
 use axum::extract::{OriginalUri, Path, State};
 use axum::response::Response;
@@ -28,6 +29,7 @@ async fn pypi_simple_root_get(State(app): State<App>, OriginalUri(uri): Original
     };
     app.handle_metadata(
         upstream,
+        UPSTREAM_PYPI_SIMPLE,
         MetadataRewrite::Pypi(app.public_base_url().to_owned()),
     )
     .await
@@ -40,6 +42,7 @@ async fn pypi_simple_root_head(State(app): State<App>, OriginalUri(uri): Origina
     };
     app.handle_metadata_head(
         upstream,
+        UPSTREAM_PYPI_SIMPLE,
         MetadataRewrite::Pypi(app.public_base_url().to_owned()),
     )
     .await
@@ -56,6 +59,7 @@ async fn pypi_simple_project_get(
     };
     app.handle_metadata(
         upstream,
+        UPSTREAM_PYPI_SIMPLE,
         MetadataRewrite::Pypi(app.public_base_url().to_owned()),
     )
     .await
@@ -72,6 +76,7 @@ async fn pypi_simple_project_head(
     };
     app.handle_metadata_head(
         upstream,
+        UPSTREAM_PYPI_SIMPLE,
         MetadataRewrite::Pypi(app.public_base_url().to_owned()),
     )
     .await
@@ -86,7 +91,7 @@ async fn pypi_file_get(
     let Some(upstream) = pypi_file_url(&path, app.upstreams()) else {
         return crate::proxy::not_found();
     };
-    app.handle_artifact(upstream)
+    app.handle_artifact(upstream, UPSTREAM_PYPI_FILES)
         .await
         .unwrap_or_else(|error| request_failed_response("GET", &uri, &error))
 }

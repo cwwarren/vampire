@@ -1,6 +1,7 @@
 use crate::proxy::{MetadataRewrite, request_failed_response};
 use crate::routes::{cargo_config, cargo_download_url, cargo_index_url};
 use crate::state::App;
+use crate::stats::{UPSTREAM_CARGO_DOWNLOAD, UPSTREAM_CARGO_INDEX};
 use axum::Router;
 use axum::body::Body;
 use axum::extract::{OriginalUri, Path, State};
@@ -58,7 +59,7 @@ async fn cargo_index_get(
     let Some(upstream) = cargo_index_url(app.upstreams(), &path) else {
         return crate::proxy::not_found();
     };
-    app.handle_metadata(upstream, MetadataRewrite::None)
+    app.handle_metadata(upstream, UPSTREAM_CARGO_INDEX, MetadataRewrite::None)
         .await
         .unwrap_or_else(|error| request_failed_response("GET", &uri, &error))
 }
@@ -71,7 +72,7 @@ async fn cargo_index_head(
     let Some(upstream) = cargo_index_url(app.upstreams(), &path) else {
         return crate::proxy::not_found();
     };
-    app.handle_metadata_head(upstream, MetadataRewrite::None)
+    app.handle_metadata_head(upstream, UPSTREAM_CARGO_INDEX, MetadataRewrite::None)
         .await
         .unwrap_or_else(|error| request_failed_response("HEAD", &uri, &error))
 }
@@ -84,7 +85,7 @@ async fn cargo_download_get(
     let Some(upstream) = cargo_download_url(app.upstreams(), &crate_name, &version) else {
         return crate::proxy::not_found();
     };
-    app.handle_artifact(upstream)
+    app.handle_artifact(upstream, UPSTREAM_CARGO_DOWNLOAD)
         .await
         .unwrap_or_else(|error| request_failed_response("GET", &uri, &error))
 }

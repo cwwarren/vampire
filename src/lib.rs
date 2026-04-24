@@ -14,4 +14,7 @@ pub mod stats;
 
 pub use config::Config;
 pub use state::App;
-pub use stats::StatsSnapshot;
+pub use stats::{
+    StatsSnapshot, UPSTREAM_CARGO_DOWNLOAD, UPSTREAM_CARGO_INDEX, UPSTREAM_GITHUB, UPSTREAM_NPM,
+    UPSTREAM_PYPI_FILES, UPSTREAM_PYPI_SIMPLE,
+};

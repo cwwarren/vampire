@@ -83,6 +83,7 @@ impl App {
     pub(crate) async fn handle_metadata_head(
         &self,
         upstream: reqwest::Url,
+        upstream_type: &'static str,
         rewrite: MetadataRewrite,
     ) -> io::Result<Response> {
         let key = CacheStore::metadata_key(upstream.as_str());
@@ -101,7 +102,8 @@ impl App {
                 Ok(empty_response_from_meta(&meta))
             }
             rewrite => Ok(response_without_body(
-                self.fetch_metadata(upstream, rewrite, key).await?,
+                self.fetch_metadata(upstream, upstream_type, rewrite, key)
+                    .await?,
             )),
         }
     }
@@ -109,30 +111,33 @@ impl App {
     pub(crate) async fn handle_metadata(
         &self,
         upstream: reqwest::Url,
+        upstream_type: &'static str,
         rewrite: MetadataRewrite,
     ) -> io::Result<Response> {
         let key = CacheStore::metadata_key(upstream.as_str());
         if let Some(entry) = self.cache().load(&key).await? {
             if entry.meta.etag.is_some() || entry.meta.last_modified.is_some() {
                 return self
-                    .revalidate_metadata(upstream, rewrite, key, entry)
+                    .revalidate_metadata(upstream, upstream_type, rewrite, key, entry)
                     .await;
             }
             let body = entry.read_body().await?;
             return Ok(bytes_response(&entry.meta, body));
         }
-        self.fetch_metadata(upstream, rewrite, key).await
+        self.fetch_metadata(upstream, upstream_type, rewrite, key)
+            .await
     }
 
     async fn revalidate_metadata(
         &self,
         upstream: reqwest::Url,
+        upstream_type: &'static str,
         rewrite: MetadataRewrite,
         key: String,
         entry: StoredEntry,
     ) -> io::Result<Response> {
         let mut request = self.client().get(upstream.clone());
-        self.stats().record_metadata_fetch(upstream.as_str());
+        self.stats().record_metadata_fetch(upstream_type);
         if let Some(etag) = &entry.meta.etag {
             request = request.header(IF_NONE_MATCH.as_str(), etag);
         }
@@ -150,10 +155,11 @@ impl App {
     async fn fetch_metadata(
         &self,
         upstream: reqwest::Url,
+        upstream_type: &'static str,
         rewrite: MetadataRewrite,
         key: String,
     ) -> io::Result<Response> {
-        self.stats().record_metadata_fetch(upstream.as_str());
+        self.stats().record_metadata_fetch(upstream_type);
         let response = self
             .client()
             .get(upstream)
@@ -194,26 +200,36 @@ impl App {
         Ok(bytes_response(&meta, Bytes::from(rewritten)))
     }
 
-    pub(crate) async fn handle_artifact(&self, upstream: reqwest::Url) -> io::Result<Response> {
+    pub(crate) async fn handle_artifact(
+        &self,
+        upstream: reqwest::Url,
+        upstream_type: &'static str,
+    ) -> io::Result<Response> {
         let key = CacheStore::artifact_key(upstream.as_str());
         match self.cache().lookup_or_start_artifact(key.clone()).await? {
             ArtifactLookup::Hit(entry) => file_response(entry).await,
             ArtifactLookup::Join(inflight) => {
-                self.stats().record_artifact_join(upstream.as_str());
+                self.stats().record_artifact_join(upstream_type);
                 self.serve_inflight(&key, inflight).await
             }
             ArtifactLookup::Leader(leader) => {
                 let inflight = leader.inflight.clone();
-                self.spawn_artifact_fetch(upstream, leader);
+                self.spawn_artifact_fetch(upstream, upstream_type, leader);
                 self.serve_inflight(&key, inflight).await
             }
         }
     }
 
-    fn spawn_artifact_fetch(&self, upstream: reqwest::Url, leader: ArtifactLeader) {
+    fn spawn_artifact_fetch(
+        &self,
+        upstream: reqwest::Url,
+        upstream_type: &'static str,
+        leader: ArtifactLeader,
+    ) {
         let app = self.clone();
         tokio::spawn(async move {
-            app.run_artifact_fetch(upstream, leader).await;
+            app.run_artifact_fetch(upstream, upstream_type, leader)
+                .await;
         });
     }
 
@@ -237,7 +253,12 @@ impl App {
         }
     }
 
-    pub(crate) async fn run_artifact_fetch(&self, upstream: reqwest::Url, leader: ArtifactLeader) {
+    pub(crate) async fn run_artifact_fetch(
+        &self,
+        upstream: reqwest::Url,
+        upstream_type: &'static str,
+        leader: ArtifactLeader,
+    ) {
         let mut cleanup = ArtifactFetchCleanup {
             app: self.clone(),
             inflight: leader.inflight.clone(),
@@ -245,7 +266,9 @@ impl App {
             temp_path: leader.paths.temp.clone(),
             armed: true,
         };
-        let result = self.do_artifact_fetch(&upstream, &leader).await;
+        let result = self
+            .do_artifact_fetch(&upstream, upstream_type, &leader)
+            .await;
         if result.is_err() {
             let _ = fs::remove_file(&leader.paths.temp).await;
         }
@@ -274,6 +297,7 @@ impl App {
     async fn do_artifact_fetch(
         &self,
         upstream: &reqwest::Url,
+        upstream_type: &'static str,
         leader: &ArtifactLeader,
     ) -> Result<FetchOutcome, (String, String)> {
         let _permit = self
@@ -281,7 +305,7 @@ impl App {
             .acquire_upstream_permit()
             .await
             .map_err(|e| ("acquire_upstream_permit".into(), e.to_string()))?;
-        self.stats().record_artifact_fetch(upstream.as_str());
+        self.stats().record_artifact_fetch(upstream_type);
         let response = self
             .client()
             .get(upstream.clone())
@@ -555,7 +579,9 @@ mod tests {
         let app_task = app.clone();
         let upstream_task = upstream_url.clone();
         let task = tokio::spawn(async move {
-            app_task.run_artifact_fetch(upstream_task, leader).await;
+            app_task
+                .run_artifact_fetch(upstream_task, "test_upstream", leader)
+                .await;
         });
         started.notified().await;
         task.abort();

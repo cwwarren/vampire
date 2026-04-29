@@ -33,7 +33,7 @@
 - Publish an official image to `ghcr.io/<repo-owner>/vampire`.
 - Container defaults set `VAMPIRE_PKG_BIND=0.0.0.0:8080`.
 - Container defaults set `VAMPIRE_GIT_BIND=0.0.0.0:8081`.
-- Container defaults set `VAMPIRE_MANAGEMENT_BIND=0.0.0.0:8082`.
+- Container defaults set `VAMPIRE_MANAGEMENT_BIND=127.0.0.1:8082`.
 - Container defaults set `VAMPIRE_CACHE_DIR=/var/cache/vampire`.
 - `VAMPIRE_PUBLIC_BASE_URL` remains required at runtime and has no container default because it is deployment-specific.
 - Published tags are `latest` and `sha-<full git sha>`.

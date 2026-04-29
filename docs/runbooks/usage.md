@@ -22,7 +22,7 @@ docker run --rm \
 Container defaults:
 - `VAMPIRE_PKG_BIND=0.0.0.0:8080`
 - `VAMPIRE_GIT_BIND=0.0.0.0:8081`
-- `VAMPIRE_MANAGEMENT_BIND=0.0.0.0:8082`
+- `VAMPIRE_MANAGEMENT_BIND=127.0.0.1:8082`
 - `VAMPIRE_CACHE_DIR=/var/cache/vampire`
 - `VAMPIRE_PUBLIC_BASE_URL` has no default and must be set to the externally reachable package-listener origin
 - Published tags are `latest` and `sha-<full git sha>`

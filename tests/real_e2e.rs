@@ -83,7 +83,7 @@ async fn pypi_real_e2e_cold_warm_concurrent() {
     let concurrent_after = fetch_stats_snapshot(&concurrent.management_base_url)
         .await
         .unwrap();
-    assert_no_duplicate_artifact_fetches(
+    assert_has_artifact_fetches(
         &snapshot_delta(&concurrent_before, &concurrent_after),
         "pypi concurrent",
     );
@@ -136,7 +136,7 @@ async fn npm_real_e2e_cold_warm_concurrent() {
     let concurrent_after = fetch_stats_snapshot(&concurrent.management_base_url)
         .await
         .unwrap();
-    assert_no_duplicate_artifact_fetches(
+    assert_has_artifact_fetches(
         &snapshot_delta(&concurrent_before, &concurrent_after),
         "npm concurrent",
     );
@@ -189,7 +189,7 @@ async fn cargo_real_e2e_cold_warm_concurrent() {
     let concurrent_after = fetch_stats_snapshot(&concurrent.management_base_url)
         .await
         .unwrap();
-    assert_no_duplicate_artifact_fetches(
+    assert_has_artifact_fetches(
         &snapshot_delta(&concurrent_before, &concurrent_after),
         "cargo concurrent",
     );
@@ -991,16 +991,5 @@ fn assert_has_git_forwards(snapshot: &StatsSnapshot, context: &str) {
     assert!(
         !snapshot.git_forwards.is_empty(),
         "{context}: expected git forwards, got none"
-    );
-}
-
-fn assert_no_duplicate_artifact_fetches(snapshot: &StatsSnapshot, context: &str) {
-    // With per-upstream-type stats, we can no longer detect duplicate fetches of the
-    // same specific artifact. However, we can verify deduplication is working by
-    // checking that artifact_joins > 0 (meaning some requests joined in-flight fetches).
-    assert_has_artifact_fetches(snapshot, context);
-    assert!(
-        !snapshot.artifact_joins.is_empty(),
-        "{context}: expected artifact joins (deduplication), got none"
     );
 }

@@ -9,6 +9,7 @@ use axum::http::header::CONTENT_TYPE;
 use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::response::Response;
 use bytes::Bytes;
+use futures_util::TryStreamExt;
 use std::io;
 use url::Url;
 
@@ -52,6 +53,8 @@ impl App {
         headers: &HeaderMap,
         body: Option<Bytes>,
     ) -> io::Result<Response> {
+        let method_name = method.as_str().to_owned();
+        let upstream_name = upstream.as_str().to_owned();
         let mut forwarded_headers = HeaderMap::new();
         for (name, value) in headers {
             if is_allowlisted_git_request_header(&method, name.as_str()) {
@@ -59,7 +62,7 @@ impl App {
             }
         }
         let mut request = self
-            .client()
+            .git_client()
             .request(method, upstream)
             .headers(forwarded_headers);
         if let Some(body) = body {
@@ -69,7 +72,18 @@ impl App {
         self.stats().record_git_forward(UPSTREAM_GITHUB);
         let status = response.status();
         let upstream_headers = response.headers().clone();
-        let mut output = Response::new(Body::from_stream(response.bytes_stream()));
+        let stream = response.bytes_stream().map_err(move |error| {
+            log_failure(
+                "git_stream_failed",
+                serde_json::json!({
+                    "method": method_name.as_str(),
+                    "upstream": upstream_name.as_str(),
+                    "error": error.to_string(),
+                }),
+            );
+            error
+        });
+        let mut output = Response::new(Body::from_stream(stream));
         *output.status_mut() = status;
         for (name, value) in &upstream_headers {
             if !is_hop_header(name.as_str()) {
@@ -90,14 +104,14 @@ impl<'a> GithubGitPath<'a> {
 
     fn upstream_url(&self, upstreams: &RegistryOrigins, query: Option<&str>) -> Option<Url> {
         match self.rpc {
-            GithubGitRpc::InfoRefs if query == Some("service=git-upload-pack") => join_url(
-                &upstreams.github,
-                &format!(
-                    "{}/{repo}.git/info/refs?service=git-upload-pack",
-                    self.owner,
-                    repo = self.repo
-                ),
-            ),
+            GithubGitRpc::InfoRefs if query == Some("service=git-upload-pack") => {
+                let mut url = join_url(
+                    &upstreams.github,
+                    &format!("{}/{repo}.git/info/refs", self.owner, repo = self.repo),
+                )?;
+                url.set_query(Some("service=git-upload-pack"));
+                Some(url)
+            }
             GithubGitRpc::UploadPack if query.is_none() => join_url(
                 &upstreams.github,
                 &format!(

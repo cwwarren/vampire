@@ -19,6 +19,5 @@ ENV VAMPIRE_CACHE_DIR=/var/cache/vampire
 WORKDIR /var/cache/vampire
 EXPOSE 8080
 EXPOSE 8081
-EXPOSE 8082
 VOLUME ["/var/cache/vampire"]
 ENTRYPOINT ["/usr/local/bin/vampire"]

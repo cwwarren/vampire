@@ -12,7 +12,6 @@ cargo run
 docker run --rm \
   -p 8080:8080 \
   -p 8081:8081 \
-  -p 8082:8082 \
   -v vampire-cache:/var/cache/vampire \
   -e VAMPIRE_PUBLIC_BASE_URL=http://127.0.0.1:8080 \
   -e VAMPIRE_MAX_CACHE_SIZE_MB=10000 \
@@ -27,9 +26,24 @@ Container defaults:
 - `VAMPIRE_PUBLIC_BASE_URL` has no default and must be set to the externally reachable package-listener origin
 - Published tags are `latest` and `sha-<full git sha>`
 
+The unauthenticated management listener is not published by default. To expose it only on a trusted host interface, opt in explicitly:
+
+```bash
+docker run --rm \
+  -p 8080:8080 \
+  -p 8081:8081 \
+  -p 127.0.0.1:8082:8082 \
+  -v vampire-cache:/var/cache/vampire \
+  -e VAMPIRE_PUBLIC_BASE_URL=http://127.0.0.1:8080 \
+  -e VAMPIRE_MAX_CACHE_SIZE_MB=10000 \
+  -e VAMPIRE_MANAGEMENT_BIND=0.0.0.0:8082 \
+  ghcr.io/cwwarren/vampire:latest
+```
+
 Listener configuration:
 - Each listener uses a single `*_BIND` socket address.
 - Supported listener prefixes are `PKG`, `GIT`, and `MANAGEMENT`.
+- Resource limits and `VAMPIRE_UPSTREAM_TIMEOUT_MS` must be positive. The timeout is the package request/body deadline; the separate Git client uses the same value for connection setup and idle time between response chunks, with no total Git response deadline.
 
 ## Client Configuration
 ```bash
@@ -122,22 +136,25 @@ Notes:
 - `pip` and `uv` need the `simple/` endpoint.
 - `npm` and `bun` need the `/npm/` endpoint.
 - Git-pinned dependencies use a separate listener on `VAMPIRE_GIT_BIND` (default `127.0.0.1:8081`). pip, uv, npm, and cargo all shell out to the system `git` binary, so `GIT_CONFIG_GLOBAL` with a `url.*.insteadOf` rewrite redirects their GitHub git traffic through vampire. Cargo requires `net.git-fetch-with-cli = true` in its config to use the system git (it defaults to its own git implementation which does not respect `GIT_CONFIG_GLOBAL`).
-- Git traffic is GitHub-only, read-only, uncached, and path-validated before forwarding. Responses stream through directly; `git-upload-pack` request bodies use the 8 MiB preforwarding cap.
+- Git traffic is GitHub-only, read-only, uncached, and path-validated before forwarding. Requests forward only `Git-Protocol`, plus `Content-Type` and `Content-Encoding` on `git-upload-pack`. Responses stream through directly; `git-upload-pack` request bodies use the 8 MiB preforwarding cap.
 - If you run vampire over HTTPS with a trusted certificate, drop `PIP_TRUSTED_HOST` and `UV_INSECURE_HOST`.
 - `npm` has other useful env-only toggles for sandboxes because every documented config key can be set through `NPM_CONFIG_*`.
 
 ## Operational Notes
-- Scrape Prometheus metrics from `GET /stats` on the management listener. The endpoint is synthetic, uncached, and exposes the in-memory `artifact_fetches`, `metadata_fetches`, `artifact_joins`, and `git_forwards` counters keyed by upstream URL.
+- Scrape Prometheus metrics from `GET /stats` on the management listener. The endpoint is synthetic, uncached, and exposes the in-memory `artifact_fetches`, `metadata_fetches`, `artifact_joins`, and `git_forwards` counters keyed by upstream type.
 - The management listener is unauthenticated. Leave it on loopback or another trusted internal interface unless you deliberately want to expose operational metadata.
-- One vampire process must own a cache directory.
-- `*.part` files are in-flight downloads and are cleaned on startup if stale.
-- Artifact misses are single-flight per cache key. Vampire waits for the full upstream artifact before replying, then serves the committed file.
-- Metadata cache fill is best-effort. Concurrent cold metadata requests can fetch upstream in parallel and race to populate cache.
-- All cache entries are committed as one file, so readers never see mixed headers and body bytes.
+- One vampire process must exclusively own a dedicated cache directory. Vampire writes and exclusively locks `.vampire-cache-v1`; another process using the same directory fails startup. An unmarked nonempty directory is refused unless every entry has an exact current, legacy, or recognized temp cache filename.
+- Once the ownership lock is held, every recognized cache temp is orphaned and is removed on startup; unrelated names are left untouched.
+- Artifact GET and metadata GET or HEAD misses are single-flight per representation cache key. Duplicate requests join the leader; cold artifact HEAD requests use the same capacity bound without joining. `VAMPIRE_MAX_UPSTREAM_FETCHES` bounds both classes, and excess work fails fast.
+- Admission saturation returns HTTP 503 without starting or queueing new unique upstream work.
+- Upstream and rewritten metadata bodies are capped at 128 MiB; upstream size uses both a `Content-Length` precheck and a streaming byte limit. Non-200 artifact bodies are capped at 1 MiB.
+- Buffered metadata has a separate 1 GiB byte-weighted reservation budget. Reservations cover reported or observed input size and bounded rewrite working space, then remain attached to the shared response bytes through delivery.
+- All cache entries are committed as one file and served through the opened entry, so replacement or eviction cannot mix headers and body bytes.
 - Rewritten npm and PyPI metadata omit upstream `ETag` and `Last-Modified` in client responses; vampire keeps those validators only for its own upstream revalidation.
-- HEAD responses mirror GET headers. On cold rewritten npm/PyPI metadata requests, vampire performs the normal fetch-and-rewrite path so `Content-Length` matches the eventual GET response.
-- The cache bound is soft during a successful commit and enforced immediately after the write finishes.
-- Failure logs are JSON lines on stderr with `event=request_failed`, `event=artifact_fetch_failed`, or `event=startup_failed`.
+- Cached artifact HEAD mirrors cached GET headers; cold artifact HEAD forwards an upstream HEAD. Metadata HEAD uses the same cache lookup and conditional GET lifecycle as metadata GET, then discards the body.
+- A completed entry stays pinned through response handoff, so a successful commit may remain above the cache bound until all waiters have opened it. Final pin drops request bound enforcement through one capacity-one janitor queue, coalescing bursts into at most one follow-up scan.
+- Package redirects are followed for at most 10 hops and only when scheme, host, and effective port stay unchanged; credential-bearing and HTTPS-to-HTTP redirects are rejected. Git redirects are disabled.
+- Failure logs are JSON lines on stderr with `event=request_failed`, `event=artifact_fetch_failed`, `event=startup_failed`, `event=git_rejected`, `event=git_body_read_failed`, or `event=git_stream_failed`.
 
 ## Test
 ```bash
@@ -146,8 +163,8 @@ cargo test --test real_e2e -- --ignored --test-threads=1 --nocapture
 ```
 
 ## CI
-- GitHub Actions runs on the ARC scale-set label `procyon-vampire`.
-- Do not combine `self-hosted` with the ARC scale-set name in `runs-on`.
+- GitHub Actions runs on `ubuntu-latest` hosted runners.
+- A newer run cancels any older in-progress run for the same branch or pull-request ref.
 - `pull_request` runs `cargo test` and the live suite in parallel for PR validation.
 - `push` runs only on `main`, so PR branches do not get an extra duplicate push workflow.
-- `push` to `main` also publishes `ghcr.io/<owner>/vampire` with `latest` and `sha-<full git sha>` tags from the ARC runner.
+- `push` to `main` also publishes `ghcr.io/<owner>/vampire` with `latest` and `sha-<full git sha>` tags.

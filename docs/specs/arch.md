@@ -33,9 +33,11 @@ App { inner: Arc<AppInner> }
 
 AppInner {
     cache: CacheStore,          // disk cache + inflight map
-    client: reqwest::Client,    // connection pool (internally Arc'd)
-    stats: AppStats,            // Mutex<StatsInner> (std::sync, not tokio)
+    client: reqwest::Client,         // same-origin package redirects
+    git_client: reqwest::Client,     // redirects disabled
+    stats: AppStats,                 // mutex-protected counters
     upstreams: RegistryOrigins, // 6 upstream base URLs
+    public_base_url: String,    // configured rewrite origin
 }
 ```
 
@@ -45,11 +47,18 @@ Synchronization primitives within `CacheStore`:
 
 | Field | Type | Purpose |
 |---|---|---|
-| `inflight` | `tokio::sync::Mutex<HashMap<String, Arc<Inflight>>>` | Maps cache keys to in-progress artifact fetches |
+| `inflight` | `tokio::sync::Mutex<HashMap<String, Arc<Inflight>>>` | Maps representation cache keys to in-progress artifact or metadata fetches |
+| `pins` | `std::sync::Mutex<HashMap<String, Weak<()>>>` | Keeps newly published artifacts from eviction until waiters open them |
+| `eviction_lock` | `Arc<tokio::sync::Mutex<()>>` | Serializes startup, metadata-write, and deferred artifact eviction scans |
+| `eviction_tx` | `tokio::sync::mpsc::Sender<Arc<std::fs::File>>` | Coalesces deferred artifact eviction requests through a capacity-one janitor queue |
 | `temp_counter` | `AtomicU64` (Relaxed) | Generates unique temp file suffixes |
-| `upstream_semaphore` | `Arc<Semaphore>` | Bounds concurrent upstream artifact fetches (default 32). Arc because `acquire_owned()` requires it |
+| `upstream_semaphore` | `Arc<Semaphore>` | Bounds artifact GET leaders, metadata leaders, and uncached artifact HEAD requests together (default 32) |
+| `metadata_memory_semaphore` | `Arc<Semaphore>` | Tracks buffered input and bounded rewrite working space in MiB against a separate 1 GiB budget |
+| `directory_lock` | `Arc<std::fs::File>` | Holds the exclusive advisory lock on the ownership marker for the store lifetime |
 
 `AppStats` uses `std::sync::Mutex` (not tokio) because the lock is held only for fast HashMap operations, never across await points.
+
+The package client applies `VAMPIRE_UPSTREAM_TIMEOUT_MS` as its total request/body deadline. It permits at most 10 redirects that retain the original scheme, host, and effective port, rejecting credentials, cross-origin redirects, and HTTPS downgrades. The Git client disables redirects and applies the same timeout value to connection setup and each idle interval between response chunks, with no total response deadline.
 
 ## Request flow
 
@@ -83,9 +92,9 @@ The management listener is stats-only:
 |---|---|---|
 | `/stats` | synthetic | Prometheus exposition for in-memory stats |
 
-Artifact routes for PyPI and npm encode the upstream path directly in the URL (e.g., `/pypi/files/packages/ab/cd/file.whl`). The proxy joins this path with the known upstream base URL. Path injection is prevented by `join_url`, which rejects absolute paths, `//` prefixes, and full URLs, then validates the resulting origin matches the base.
+Package handlers preserve the raw URI path, reject client queries, and pass only canonical relative paths to `join_url`. Validation rejects absolute paths, doubled separators, backslashes, dot segments, malformed or lowercase escapes, encoded separators, encoded unreserved aliases, query or fragment delimiters, and origin changes. Canonical safe escapes remain encoded; scoped npm packuments accept either hex case for `%2F` and normalize it to uppercase before identity and forwarding.
 
-PyPI simple project routes accept exactly one decoded project path segment. Requests whose decoded project contains `/`, including percent-encoded slashes, are rejected locally before any upstream URL is built.
+PyPI simple project routes accept exactly one canonical raw project segment. Literal and percent-encoded slashes are rejected locally before any upstream URL is built.
 
 Git traffic stays uncached and fail-closed. The handler parses the raw request URI, rejects absolute-form targets, URL-userinfo, `git-receive-pack`, doubled slashes, dot segments, encoded repo segments, encoded separators, malformed escapes, and other non-canonical path forms locally, then forwards only accepted `git-upload-pack` requests to `https://github.com`. Upload-pack request bodies are buffered up to 8 MiB before forwarding, while accepted upstream git responses are streamed directly back to the client.
 
@@ -93,21 +102,21 @@ Git traffic stays uncached and fail-closed. The handler parses the raw request U
 
 ```
 handle_metadata(upstream, rewrite)
-  key = SHA256("metadata\0" + upstream_url + "\0")  // hex-encoded, 64 chars
-  if cached:
-    if has etag or last-modified:
-      conditional GET → 304 returns cached, else re-fetch
-    else:
-      return cached body
-  else:
-    fetch from upstream
+  identity = raw:v1 | npm:v2:<origin> | pypi:v1:<origin>
+  key = hash("metadata", canonical_upstream_url, identity)
+  lookup_or_start(key):
+    Join → wait for the existing cold fetch or revalidation
+    Leader → return 503 if admission is full, otherwise continue
+    Hit with validator → conditional GET; 304 returns the opened entry
+    Miss → GET upstream
+  reject upstream or rewritten bodies larger than 128 MiB
   apply rewrite (None / PyPI HTML / npm JSON)
   if status 200 AND has etag or last-modified:
     store to disk (atomic write)
   return response
 ```
 
-Metadata is only cached when the upstream provides a cache validator (etag or last-modified). Metadata fetches are NOT gated by the upstream semaphore.
+Metadata is only cached when the upstream provides a cache validator (etag or last-modified). Cold fetches and validator revalidations are single-flight by representation cache key and share the upstream admission semaphore with artifact leaders. A separate 1 GiB memory budget reserves reported or observed input size in 1 MiB units, then reserves the bounded rewrite working set before allocation. The reservation is attached to the resulting shared `Bytes` and is released only after all response clones drop. Duplicate work joins; a unique request returns HTTP 503 when either admission bound cannot admit more work.
 For rewritten npm and PyPI metadata, vampire still stores those upstream validators for its own conditional GETs, but strips `ETag` and `Last-Modified` from the client-facing response headers because the served bytes differ from the upstream representation.
 
 ### Artifact path
@@ -118,20 +127,25 @@ handle_artifact(upstream)
   lookup_or_start_artifact(key):
     Hit  → stream file from disk
     Join → wait on existing inflight, then serve result
-    Leader → spawn background fetch, wait on inflight, then serve result
+    Leader → return 503 if admission is full; otherwise fetch and serve the result
 ```
 
-The requesting handler always goes through `serve_inflight` — even the Leader request waits on the `Inflight` outcome rather than getting special treatment.
+Join and Leader requests go through `serve_inflight`; even the Leader request waits on the `Inflight` outcome rather than getting special treatment. Hits stream their already-open entry directly.
 
 The background fetch (`run_artifact_fetch`):
-1. Acquire upstream semaphore permit
+1. Use the admission permit attached to the leader
 2. GET upstream URL
 3. Stream response body to a `<key>.part` temp file
-4. Append footer (meta JSON + 4-byte length) to `.part`, atomic rename `.part` to `<key>`
-5. Signal `Inflight` as `Cached`
-6. Remove key from inflight map
+4. Append footer (meta JSON + 4-byte length) to `.part`
+5. Create a publication pin, atomically rename `.part` to `<key>`, and return the pin token
+6. Signal `Inflight` with the token; each waiter opens its own stable entry before dropping it
+7. Remove the key from the inflight map
+
+The publication pin makes eviction skip the newly committed path until every waiter has opened its own stable entry. Dropping the final pin schedules another eviction pass, so temporary overshoot lasts through response handoff rather than ending immediately at commit.
 
 On any error or task cancellation, the `ArtifactFetchCleanup` drop guard ensures the inflight is resolved (as a 502 error response) and the key is removed from the map, so joiners are never permanently blocked.
+
+Non-200 artifact responses are returned without caching and buffered up to 1 MiB.
 
 ### Git path
 
@@ -142,17 +156,17 @@ git request
   reject absolute-form, userinfo, CONNECT, invalid path, write RPCs
   accept only GET info/refs?service=git-upload-pack
            and POST git-upload-pack
-  forward only Git-Protocol (+ Content-Type on POST)
+  forward only Git-Protocol (+ Content-Type and Content-Encoding on POST)
   stream upstream response back without writing cache entries
 ```
 
 ### HEAD path
 
-Checks the cache (artifact or metadata as appropriate). On hit, returns the cached GET-equivalent headers with an empty body.
+Artifact HEAD checks the artifact cache and otherwise sends an upstream HEAD. Metadata HEAD uses the same single-flight cache lookup and conditional GET lifecycle as metadata GET, then discards the body.
 
 On miss:
-- artifact and non-rewritten metadata paths send a real upstream HEAD and preserve the upstream `Content-Length`
-- rewritten npm and PyPI metadata paths run the normal GET + rewrite flow so vampire can compute the final rewritten headers, then return those headers with an empty body
+- artifact paths send a real upstream HEAD and preserve the upstream `Content-Length`
+- metadata paths run the normal GET, validation, and rewrite flow so headers match the corresponding GET
 - `/cargo/index/config.json` synthesizes the same `Content-Type` and `Content-Length` as GET, but with no body
 
 ## Cache storage
@@ -160,15 +174,17 @@ On miss:
 ### Key derivation
 
 ```
-hex(SHA256(class + "\0" + upstream_url + "\0"))
+artifact: hash("artifact", canonical_upstream_url)
+metadata: hash("metadata", canonical_upstream_url, representation_identity)
 ```
 
-Where `class` is the literal string `"artifact"` or `"metadata"`. First 2 hex characters are the shard directory name.
+The canonical upstream URL excludes query and fragment. Metadata representation identities are `raw:v1`, `npm:v2:<origin>`, and `pypi:v1:<origin>`. Including the rewrite origin prevents a persistent cache from serving URLs generated for an older `VAMPIRE_PUBLIC_BASE_URL`. Keys are SHA-256 hex strings; the first 2 hex characters are the shard directory name.
 
 ### Directory layout
 
 ```
 <cache_dir>/
+  .vampire-cache-v1     # ownership marker
   <shard>/              # 2-char hex prefix (256 possible directories)
     <key>               # committed cache entry (packed: body + meta footer)
     <key>.part          # temp file during artifact fetch
@@ -187,21 +203,23 @@ Artifacts and metadata share a single on-disk layout. `<key>` contains:
 
 Total file size is `N + M + 4`. `StoredResponseMeta` (`{ headers, last_modified, etag, status }`) carries both the headers returned to clients and the upstream validator fields vampire uses for conditional revalidation.
 
-Read: seek 4 bytes from end → `meta_len`, seek `4 + meta_len` from end, read `meta_len` bytes → meta JSON, body is `0 .. file_size - 4 - meta_len`. `meta_len` is rejected if it exceeds 1 MiB or the file size.
+Read: open the packed entry, seek 4 bytes from end → `meta_len`, seek `4 + meta_len` from end, read `meta_len` bytes → meta JSON, body is `0 .. file_size - 4 - meta_len`. Readers and writers reject metadata over 1 MiB. `StoredEntry` retains that open file, so a later rename or eviction cannot change the bytes paired with its parsed metadata.
 
-Write for artifacts: the upstream body is streamed straight to `<key>.part`, then the meta JSON and 4-byte length are appended to the same `.part` and it is atomically renamed to `<key>`. Write for metadata: the full packed buffer is built in memory, written to a uniquely-suffixed `.part` temp file, then atomically renamed.
+Write for artifacts: the upstream body is streamed straight to `<key>.part`, then the meta JSON and 4-byte length are appended to the same `.part` and it is atomically renamed to `<key>`. Write for metadata: body bytes, meta JSON, and the length footer are written sequentially to a uniquely-suffixed `.part` temp file, then atomically renamed. A drop guard removes the unique metadata temp after write failure or cancellation.
 
 ## Inflight dedup
 
-Prevents duplicate upstream fetches when multiple concurrent requests hit the same uncached artifact.
+Prevents duplicate upstream work when concurrent artifact GET or metadata GET or HEAD requests use the same representation cache key. Cold artifact HEAD requests use the shared admission semaphore without joining inflight work.
 
 ### State machine
 
 `lookup_or_start_artifact(key)` returns one of:
 
-- **Hit** — artifact exists on disk. Serve immediately.
-- **Join** — another request is already fetching this key. Wait on its `Inflight`.
-- **Leader** — no one is fetching this key. Register in the inflight map, return a `Leader` token. The caller spawns the background fetch task.
+- **Hit** — a completed entry exists on disk. Serve its stable open handle immediately.
+- **Join** — another request is fetching or revalidating this key. Wait on its `Inflight`.
+- **Leader** — no work exists for this key and admission capacity is available. Register it and start upstream work.
+
+When admission capacity is exhausted, lookup returns `WouldBlock` without registering work; handlers map it to HTTP 503.
 
 The implementation uses double-checked locking:
 1. Lock inflight map, check for existing entry → **Join** (skip disk I/O)
@@ -223,8 +241,9 @@ loop {
 ```
 
 The `notified()` future is created before locking to prevent lost wakeups. Outcomes:
-- `Cached` — file committed to disk, waiter loads and streams it
-- `Response(meta, body)` — non-200 upstream response or error, returned directly as bytes
+- `Cached` — file committed to disk and pinned long enough for waiters to open and stream it
+- `Response(meta, body)` — non-200 upstream response returned directly as bytes
+- `Failed(kind, error)` — leader failure with its I/O kind preserved; `WouldBlock` is returned to every waiter as HTTP 503 and other failures as HTTP 502
 
 ### Cancellation safety
 
@@ -232,17 +251,18 @@ The `notified()` future is created before locking to prevent lost wakeups. Outco
 
 ## Eviction
 
-At startup, `cleanup_stale_and_legacy` walks the cache tree, deletes any `.part` files older than 5 minutes (remnants of interrupted fetches), and unconditionally removes any leftover `<key>.json` and `<key>.body` files from the pre-unification split format.
+At startup, vampire requires `.vampire-cache-v1`. It creates the marker for an empty directory or an unmarked directory containing only exact current, legacy, or recognized temp cache filenames; any other nonempty unmarked directory fails startup unchanged. The process takes an exclusive advisory lock on the marker and fails startup if another vampire holds it. Because that lock proves no writer is live, `cleanup_stale_and_legacy` deletes every recognized temp and legacy file from exact two-lowercase-hex shard directories immediately; unrelated files and directories are untouched.
 
-LRU-by-mtime eviction runs inline after every successful cache write (`store_metadata`, `commit_artifact`) and once at startup.
+Oldest-first-by-mtime eviction runs inline after metadata writes and once at startup. Artifact publication defers eviction until the final publication pin drops. One janitor task consumes a capacity-one queue and shares the async eviction lock with inline scans. After acquiring the lock it drains requests that accumulated while waiting, then scans once. A drop during the scan queues one follow-up pass; further drops coalesce into that pending request, so deferred work is bounded to one worker and one queued scan.
 
 Algorithm:
-1. Walk the entire cache directory tree, collecting all extensionless `<key>` files
+1. Inspect exact shard directories and collect only extensionless 64-lowercase-hex `<key>` files
 2. Sum all sizes (each entry is a single file). If under `max_cache_size`, return
 3. Sort by mtime ascending (oldest first)
 4. Delete oldest entries until total is under the limit
 
 Metadata and artifact entries compete equally for space. There is no separate quota.
+Eviction skips a freshly published target while its publication pin is live. The final pin drop schedules bound enforcement.
 
 ## Metadata rewriting
 
@@ -259,7 +279,7 @@ Rewritten PyPI responses do not forward upstream `ETag` or `Last-Modified` heade
 
 ### npm (JSON)
 
-Parses the full packument as `serde_json::Value`. Rewrites `dist.tarball` on the root object and on every entry in `versions.*`:
+Keeps unrelated packument values as borrowed raw JSON and materializes only the root, `versions`, package, and `dist` maps needed to rewrite `dist.tarball` on the root object and every entry in `versions.*`:
 - URLs matching the configured `npm` origin or hostname `registry.npmjs.org` → `{VAMPIRE_PUBLIC_BASE_URL}/npm/tarballs/{relative_path}`
 - Other URLs → unchanged
 
@@ -278,9 +298,12 @@ No rewriting. Cargo discovers the download URL from `/cargo/index/config.json`, 
 ```
 
 Events:
-- `startup_failed` — config, bind, or app initialization error (with `stage` field; `bind_pkg_listener` and `bind_git_listener` stages include the `bind` address)
+- `startup_failed` — config, bind, or app initialization error (with `stage` field; listener-bind stages include the `bind` address)
 - `request_failed` — any handler-level I/O error propagated to the route (with `method`, `path`, `query`, `error`)
 - `artifact_fetch_failed` — background fetch task error (with `stage`, `upstream`, `cache_key`, `error`)
+- `git_rejected` — rejected Git request (with `method`, `path`, `query`, `status`, `message`)
+- `git_body_read_failed` — rejected Git request body (with `method`, `path`, `error`)
+- `git_stream_failed` — Git response stream failure (with `method`, `upstream`, `error`)
 
 ## Stats
 

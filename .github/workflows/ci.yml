@@ -5,8 +5,10 @@ on:
   push:
     branches:
       - main
-    tags:
-      - 'v*'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   heavy:
@@ -64,7 +66,7 @@ jobs:
           ./.ci-artifacts/real-e2e/real_e2e --ignored --test-threads=1 --nocapture
 
   publish-image:
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs:
       - heavy
       - real-e2e
@@ -86,9 +88,9 @@ jobs:
           --label org.opencontainers.image.source=https://github.com/${{ github.repository }}
           --label org.opencontainers.image.revision=${{ github.sha }}
           -t ${IMAGE_NAME}:latest
-          -t ${IMAGE_NAME}:${{ github.ref_name }}
+          -t ${IMAGE_NAME}:sha-${{ github.sha }}
           .
       - name: Push image
         run: |
           docker push "${IMAGE_NAME}:latest"
-          docker push "${IMAGE_NAME}:${{ github.ref_name }}"
+          docker push "${IMAGE_NAME}:sha-${{ github.sha }}"

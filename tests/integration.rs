@@ -19,7 +19,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 use tokio::time::{Duration, Instant};
-use vampire::routes::RegistryOrigins;
 use vampire::{App, Config};
 
 #[tokio::test]
@@ -28,6 +27,16 @@ async fn rejects_unknown_routes() {
     let response = fixture
         .client
         .get(format!("{}/nope", fixture.pkg_base_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let response = fixture
+        .client
+        .get(format!(
+            "{}/cargo/index/config.json?alias=true",
+            fixture.pkg_base_url
+        ))
         .send()
         .await
         .unwrap();
@@ -196,6 +205,31 @@ async fn rejects_encoded_slashes_in_pypi_project_head() {
 }
 
 #[tokio::test]
+async fn rejects_encoded_fragment_cache_aliases() {
+    let upstream = Upstream::new().await.unwrap();
+    upstream
+        .insert(
+            "/pkg/-/pkg.tgz",
+            UpstreamResponse::bytes(200, "application/octet-stream", b"package".to_vec()),
+        )
+        .await;
+    let fixture = TestFixture::with_servers(upstream.clone()).await.unwrap();
+    for fragment in ["one", "two"] {
+        let response = fixture
+            .client
+            .get(format!(
+                "{}/npm/tarballs/pkg/-/pkg.tgz%23{fragment}",
+                fixture.pkg_base_url
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+    assert_eq!(upstream.request_count("/pkg/-/pkg.tgz").await, 0);
+}
+
+#[tokio::test]
 async fn caches_artifacts_and_dedupes_misses() {
     let upstream = Upstream::new().await.unwrap();
     upstream
@@ -235,6 +269,95 @@ async fn caches_artifacts_and_dedupes_misses() {
             .await,
         1
     );
+}
+
+#[tokio::test]
+async fn serves_artifact_larger_than_cache_bound() {
+    let upstream = Upstream::new().await.unwrap();
+    upstream
+        .insert(
+            "/crates/demo/demo-1.0.0.crate",
+            UpstreamResponse::bytes(200, "application/octet-stream", vec![b'x'; 128 * 1024]),
+        )
+        .await;
+    let fixture = TestFixture::with_servers_and_limits(upstream.clone(), 1, 8)
+        .await
+        .unwrap();
+    let response = fixture
+        .client
+        .get(format!(
+            "{}/cargo/api/v1/crates/demo/1.0.0/download",
+            fixture.pkg_base_url
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.bytes().await.unwrap().len(), 128 * 1024);
+    assert_eq!(
+        upstream
+            .request_count("/crates/demo/demo-1.0.0.crate")
+            .await,
+        1
+    );
+}
+
+#[tokio::test]
+async fn rejects_unadmitted_unique_work_with_service_unavailable() {
+    let upstream = Upstream::new().await.unwrap();
+    upstream
+        .insert(
+            "/crates/slow/slow-1.0.0.crate",
+            UpstreamResponse::slow_bytes(
+                200,
+                "application/octet-stream",
+                vec![b'a'; 1024],
+                vec![b'b'; 1024],
+                Duration::from_millis(250),
+            ),
+        )
+        .await;
+    upstream
+        .insert(
+            "/crates/other/other-1.0.0.crate",
+            UpstreamResponse::bytes(200, "application/octet-stream", b"other".to_vec()),
+        )
+        .await;
+    let fixture = TestFixture::with_servers_and_limits(upstream.clone(), 1024 * 1024, 1)
+        .await
+        .unwrap();
+    let client = fixture.client.clone();
+    let slow_url = format!(
+        "{}/cargo/api/v1/crates/slow/1.0.0/download",
+        fixture.pkg_base_url
+    );
+    let slow = tokio::spawn(async move { client.get(slow_url).send().await.unwrap() });
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while upstream
+        .request_count("/crates/slow/slow-1.0.0.crate")
+        .await
+        == 0
+    {
+        assert!(Instant::now() < deadline, "slow request did not start");
+        tokio::task::yield_now().await;
+    }
+    let rejected = fixture
+        .client
+        .get(format!(
+            "{}/cargo/api/v1/crates/other/1.0.0/download",
+            fixture.pkg_base_url
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        upstream
+            .request_count("/crates/other/other-1.0.0.crate")
+            .await,
+        0
+    );
+    assert_eq!(slow.await.unwrap().status(), StatusCode::OK);
 }
 
 #[tokio::test]
@@ -309,7 +432,7 @@ async fn cold_artifact_head_preserves_content_length() {
 }
 
 #[tokio::test]
-async fn revalidates_metadata() {
+async fn cached_metadata_head_revalidates() {
     let upstream = Upstream::new().await.unwrap();
     upstream
         .insert(
@@ -339,11 +462,18 @@ async fn revalidates_metadata() {
             UpstreamResponse::empty(304).with_if_none_match("\"v1\""),
         )
         .await;
-    let second = fixture.client.get(&url).send().await.unwrap();
+    let second = fixture.client.head(&url).send().await.unwrap();
     assert_eq!(second.status(), StatusCode::OK);
     assert!(second.headers().get("etag").is_none());
     assert!(second.headers().get("last-modified").is_none());
+    assert!(second.bytes().await.unwrap().is_empty());
     assert_eq!(upstream.request_count("/pkg").await, 2);
+    let requests = upstream.recorded_requests().await;
+    assert_eq!(requests[1].method, "GET");
+    assert_eq!(
+        requests[1].header("if-none-match").as_deref(),
+        Some("\"v1\"")
+    );
 }
 
 #[tokio::test]
@@ -466,7 +596,7 @@ async fn routes_scoped_npm_packuments_without_decoding_scope_separator() {
     let fixture = TestFixture::with_servers(upstream.clone()).await.unwrap();
     let response = fixture
         .client
-        .get(format!("{}/npm/@scope%2Fname", fixture.pkg_base_url))
+        .get(format!("{}/npm/@scope%2fname", fixture.pkg_base_url))
         .send()
         .await
         .unwrap();
@@ -484,7 +614,7 @@ async fn routes_scoped_npm_packuments_without_decoding_scope_separator() {
 }
 
 #[tokio::test]
-async fn cold_metadata_requests_run_in_parallel() {
+async fn distinct_cold_metadata_requests_run_in_parallel_within_admission_limit() {
     let upstream = Upstream::new().await.unwrap();
     upstream
         .insert(
@@ -536,6 +666,61 @@ async fn cold_metadata_requests_run_in_parallel() {
         "metadata requests serialized unexpectedly: {:?}",
         start.elapsed()
     );
+}
+
+#[tokio::test]
+async fn concurrent_cold_metadata_requests_singleflight() {
+    let upstream = Upstream::new().await.unwrap();
+    upstream
+        .insert(
+            "/npm-a",
+            UpstreamResponse::slow_json(
+                200,
+                &json!({
+                    "versions": {
+                        "1.0.0": {
+                            "dist": { "tarball": "https://registry.npmjs.org/npm-a/-/npm-a-1.0.0.tgz" }
+                        }
+                    }
+                }),
+                Duration::from_millis(250),
+            ),
+        )
+        .await;
+    let fixture = TestFixture::with_servers(upstream.clone()).await.unwrap();
+    let url = format!("{}/npm/npm-a", fixture.pkg_base_url);
+    let responses = join_all((0..8).map(|_| fixture.client.get(&url).send())).await;
+    for response in responses {
+        assert_eq!(response.unwrap().status(), StatusCode::OK);
+    }
+    assert_eq!(upstream.request_count("/npm-a").await, 1);
+}
+
+#[tokio::test]
+async fn rejects_metadata_content_length_over_limit() {
+    let upstream = Upstream::new().await.unwrap();
+    upstream
+        .insert(
+            "/npm-a",
+            UpstreamResponse::slow_bytes(
+                200,
+                "application/json",
+                Vec::new(),
+                Vec::new(),
+                Duration::ZERO,
+            )
+            .with_header("content-length", &(128_u64 * 1024 * 1024 + 1).to_string()),
+        )
+        .await;
+    let fixture = TestFixture::with_servers(upstream).await.unwrap();
+    let response = fixture
+        .client
+        .get(format!("{}/npm/npm-a", fixture.pkg_base_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    assert!(response.text().await.unwrap().contains("128 MiB limit"));
 }
 
 #[tokio::test]
@@ -1163,15 +1348,40 @@ impl TestFixture {
     }
 
     async fn with_servers(upstream: Upstream) -> io::Result<Self> {
+        Self::with_servers_and_limits(upstream, 32 * 1024 * 1024, 8).await
+    }
+
+    async fn with_servers_and_limits(
+        upstream: Upstream,
+        max_cache_size: u64,
+        max_upstream_fetches: usize,
+    ) -> io::Result<Self> {
         let pkg_bind = listen_addr().await?;
         let public_base_url = format!("http://{pkg_bind}");
-        Self::with_servers_and_public_base_url(upstream, pkg_bind, public_base_url).await
+        Self::build(
+            upstream,
+            pkg_bind,
+            public_base_url,
+            max_cache_size,
+            max_upstream_fetches,
+        )
+        .await
     }
 
     async fn with_servers_and_public_base_url(
         upstream: Upstream,
         pkg_bind: SocketAddr,
         public_base_url: String,
+    ) -> io::Result<Self> {
+        Self::build(upstream, pkg_bind, public_base_url, 32 * 1024 * 1024, 8).await
+    }
+
+    async fn build(
+        upstream: Upstream,
+        pkg_bind: SocketAddr,
+        public_base_url: String,
+        max_cache_size: u64,
+        max_upstream_fetches: usize,
     ) -> io::Result<Self> {
         let temp_dir = tempfile::tempdir()?;
         let git_bind = listen_addr().await?;
@@ -1182,28 +1392,12 @@ impl TestFixture {
             management_bind,
             public_base_url: public_base_url.clone(),
             cache_dir: PathBuf::from(temp_dir.path()),
-            max_cache_size: 32 * 1024 * 1024,
-            max_upstream_fetches: 8,
+            max_cache_size,
+            max_upstream_fetches,
             upstream_timeout: std::time::Duration::from_secs(5),
         };
-        let client = Client::builder()
-            .resolve("pypi.org", upstream.addr)
-            .resolve("files.pythonhosted.org", upstream.addr)
-            .resolve("github.com", upstream.addr)
-            .resolve("registry.npmjs.org", upstream.addr)
-            .resolve("index.crates.io", upstream.addr)
-            .resolve("static.crates.io", upstream.addr)
-            .build()
-            .map_err(io::Error::other)?;
-        let upstreams = RegistryOrigins {
-            cargo_download: reqwest::Url::parse(&format!("http://{}/", upstream.addr)).unwrap(),
-            cargo_index: reqwest::Url::parse(&format!("http://{}/", upstream.addr)).unwrap(),
-            github: reqwest::Url::parse(&format!("http://{}/", upstream.addr)).unwrap(),
-            npm: reqwest::Url::parse(&format!("http://{}/", upstream.addr)).unwrap(),
-            pypi_files: reqwest::Url::parse(&format!("http://{}/", upstream.addr)).unwrap(),
-            pypi_simple: reqwest::Url::parse(&format!("http://{}/", upstream.addr)).unwrap(),
-        };
-        let app = App::new_with_upstreams(config.clone(), client.clone(), upstreams).await?;
+        let app = App::new_with_loopback_upstream(config.clone(), upstream.addr).await?;
+        let client = Client::new();
         let pkg_listener = TcpListener::bind(pkg_bind).await?;
         let git_listener = TcpListener::bind(git_bind).await?;
         let management_listener = TcpListener::bind(management_bind).await?;

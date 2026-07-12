@@ -13,6 +13,7 @@ docker run --rm \
   -p 8080:8080 \
   -p 8081:8081 \
   -v vampire-cache:/var/cache/vampire \
+  -e VAMPIRE_PUBLIC_BASE_URL=http://127.0.0.1:8080 \
   -e VAMPIRE_MAX_CACHE_SIZE_MB=10000 \
   ghcr.io/cwwarren/vampire:latest
 ```
@@ -20,16 +21,20 @@ docker run --rm \
 Local build:
 
 ```bash
-VAMPIRE_MAX_CACHE_SIZE_MB=10000 cargo run
+VAMPIRE_PUBLIC_BASE_URL=http://127.0.0.1:8080 \
+VAMPIRE_MAX_CACHE_SIZE_MB=10000 \
+cargo run
 ```
 
 Useful server env vars:
-- `VAMPIRE_MAX_CACHE_SIZE_MB` required
+- `VAMPIRE_PUBLIC_BASE_URL` required; externally reachable package-listener origin
+- `VAMPIRE_MAX_CACHE_SIZE_MB` required and positive
 - `VAMPIRE_PKG_BIND` default `127.0.0.1:8080`
 - `VAMPIRE_GIT_BIND` default `127.0.0.1:8081`
+- `VAMPIRE_MANAGEMENT_BIND` default `127.0.0.1:8082`
 - `VAMPIRE_CACHE_DIR` default `./.cache/vampire`
-- `VAMPIRE_MAX_UPSTREAM_FETCHES` default `32`
-- `VAMPIRE_UPSTREAM_TIMEOUT_MS` default `30000`
+- `VAMPIRE_MAX_UPSTREAM_FETCHES` default `32` and positive; shared upstream admission bound
+- `VAMPIRE_UPSTREAM_TIMEOUT_MS` default `30000` and positive; package total timeout, Git connect and idle-read timeout
 
 ## Sandbox Usage
 
@@ -108,7 +113,7 @@ EOF
 
 Vampire exposes only the registry-specific paths it needs for PyPI, npm, and Cargo on its package listener, and a read-only GitHub smart-HTTP surface on its git listener for git-pinned package dependencies. The proxy keeps artifact downloads on its own URLs by rewriting PyPI and npm metadata before returning it to clients.
 
-On a cache hit, vampire serves the artifact directly from disk. On a miss, one request fetches the artifact from upstream, commits it to the cache, and then serves it; any concurrent followers wait for that completed result instead of triggering another fetch. Only completed artifacts are ever served to clients. Metadata is cached more conservatively and only when the upstream response includes validators such as `ETag` or `Last-Modified`; concurrent cold metadata requests are still allowed to race and populate cache on a best-effort basis. Every cache entry — artifact or metadata — is committed as a single atomically-renamed file.
+On a cache hit, vampire serves the artifact directly from disk. On a miss, one request fetches the artifact from upstream, commits it to the cache, and then serves it; concurrent followers wait for that completed result. Artifact and metadata leaders share the `VAMPIRE_MAX_UPSTREAM_FETCHES` admission bound, and excess unique work fails fast instead of building an unbounded queue. Metadata is cached only when the upstream response includes validators such as `ETag` or `Last-Modified`, and metadata bodies are capped at 128 MiB. Every cache entry is committed as one atomically-renamed file and served through a stable open handle.
 
 ## More
 

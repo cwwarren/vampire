@@ -50,16 +50,20 @@ impl Config {
                     .parse()
                     .map_err(|error| format!("invalid VAMPIRE_MAX_CACHE_SIZE_MB: {error}"))
             })?;
-        let max_cache_size = max_cache_size_mb * 1_000_000;
+        let max_cache_size = max_cache_size_mb.checked_mul(1_000_000).ok_or_else(|| {
+            "invalid VAMPIRE_MAX_CACHE_SIZE_MB: byte conversion overflow".to_owned()
+        })?;
         let max_upstream_fetches = var("VAMPIRE_MAX_UPSTREAM_FETCHES")
             .unwrap_or_else(|| "32".to_owned())
+            .trim()
             .parse()
             .map_err(|error| format!("invalid VAMPIRE_MAX_UPSTREAM_FETCHES: {error}"))?;
         let upstream_timeout_ms: u64 = var("VAMPIRE_UPSTREAM_TIMEOUT_MS")
             .unwrap_or_else(|| "30000".to_owned())
+            .trim()
             .parse()
             .map_err(|error| format!("invalid VAMPIRE_UPSTREAM_TIMEOUT_MS: {error}"))?;
-        Ok(Self {
+        let config = Self {
             pkg_bind,
             git_bind,
             management_bind,
@@ -68,7 +72,33 @@ impl Config {
             max_cache_size,
             max_upstream_fetches,
             upstream_timeout: Duration::from_millis(upstream_timeout_ms),
-        })
+        };
+        config.validate()?;
+        Ok(config)
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        if self.max_cache_size == 0 {
+            return Err("invalid VAMPIRE_MAX_CACHE_SIZE_MB: must be greater than zero".to_owned());
+        }
+        if self.max_upstream_fetches == 0 {
+            return Err(
+                "invalid VAMPIRE_MAX_UPSTREAM_FETCHES: must be greater than zero".to_owned(),
+            );
+        }
+        if self.upstream_timeout.is_zero() {
+            return Err(
+                "invalid VAMPIRE_UPSTREAM_TIMEOUT_MS: must be greater than zero".to_owned(),
+            );
+        }
+        let public_base_url = parse_public_base_url(&self.public_base_url)?;
+        if public_base_url != self.public_base_url {
+            return Err(
+                "invalid VAMPIRE_PUBLIC_BASE_URL: must be a normalized HTTP or HTTPS origin"
+                    .to_owned(),
+            );
+        }
+        Ok(())
     }
 }
 
@@ -197,5 +227,35 @@ mod tests {
         assert!(config_with(&[("VAMPIRE_PUBLIC_BASE_URL", "https://mirror.example/pkg")]).is_err());
         assert!(config_with(&[("VAMPIRE_UPSTREAM_TIMEOUT_MS", "xyz")]).is_err());
         assert!(config_with(&[("VAMPIRE_MAX_UPSTREAM_FETCHES", "-1")]).is_err());
+    }
+
+    #[test]
+    fn rejects_zero_resource_limits() {
+        let cache_error = config_with(&[("VAMPIRE_MAX_CACHE_SIZE_MB", "0")]).unwrap_err();
+        assert!(cache_error.contains("must be greater than zero"));
+        let fetch_error = config_with(&[("VAMPIRE_MAX_UPSTREAM_FETCHES", "0")]).unwrap_err();
+        assert!(fetch_error.contains("must be greater than zero"));
+        let timeout_error = config_with(&[("VAMPIRE_UPSTREAM_TIMEOUT_MS", "0")]).unwrap_err();
+        assert!(timeout_error.contains("must be greater than zero"));
+    }
+
+    #[test]
+    fn validates_programmatic_configs() {
+        let mut config = config_with(&[]).unwrap();
+        config.max_upstream_fetches = 0;
+        assert!(config.validate().is_err());
+        config.max_upstream_fetches = 1;
+        config.max_cache_size = 0;
+        assert!(config.validate().is_err());
+        config.max_cache_size = 1;
+        config.public_base_url = "https://mirror.example/path".to_owned();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_cache_size_overflow() {
+        let error =
+            config_with(&[("VAMPIRE_MAX_CACHE_SIZE_MB", &u64::MAX.to_string())]).unwrap_err();
+        assert!(error.contains("byte conversion overflow"));
     }
 }

@@ -116,4 +116,6 @@ Only after explicit user confirmation:
    )"
    ```
 
-Report the release URL when done.
+The `main` push publishes container tags `latest` and `sha-{full commit SHA}`. The version tag does not create a version-tagged image.
+
+Report the release URL and expected image tags when done. Do not report image publication as complete unless the GitHub Actions publish job has been verified.

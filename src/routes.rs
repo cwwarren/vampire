@@ -562,11 +562,11 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        assert!(
+        assert_eq!(
             rewritten["versions"]["1.0.0"]["dist"]["tarball"]
                 .as_str()
-                .unwrap()
-                == "http://localhost/npm/tarballs/pkg/-/pkg-1.0.0.tgz"
+                .unwrap(),
+            "http://localhost/npm/tarballs/pkg/-/pkg-1.0.0.tgz"
         );
     }
 

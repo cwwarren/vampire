@@ -20,6 +20,8 @@ pub struct StatsSnapshot {
     pub metadata_fetches: HashMap<&'static str, usize>,
     pub artifact_joins: HashMap<&'static str, usize>,
     pub git_forwards: HashMap<&'static str, usize>,
+    pub npm_search_requests: usize,
+    pub npm_audit_requests: usize,
 }
 
 impl AppStats {
@@ -41,6 +43,20 @@ impl AppStats {
     pub fn record_git_forward(&self, upstream: &'static str) {
         let mut inner = self.inner.lock().expect("stats mutex poisoned");
         *inner.git_forwards.entry(upstream).or_insert(0) += 1;
+    }
+
+    pub(crate) fn record_npm_search_request(&self) {
+        self.inner
+            .lock()
+            .expect("stats mutex poisoned")
+            .npm_search_requests += 1;
+    }
+
+    pub(crate) fn record_npm_audit_request(&self) {
+        self.inner
+            .lock()
+            .expect("stats mutex poisoned")
+            .npm_audit_requests += 1;
     }
 
     pub fn snapshot(&self) -> StatsSnapshot {
@@ -68,7 +84,7 @@ impl StatsSnapshot {
         write_counter_metric(
             &mut out,
             "vampire_metadata_fetches_total",
-            "Number of upstream metadata GETs.",
+            "Number of upstream package metadata GETs.",
             &self.metadata_fetches,
         );
         write_counter_metric(
@@ -83,6 +99,22 @@ impl StatsSnapshot {
             "Number of git requests forwarded upstream.",
             &self.git_forwards,
         );
+        for (name, help, count) in [
+            (
+                "vampire_npm_search_requests_total",
+                "Number of valid npm search requests, including HEAD and admission rejections.",
+                self.npm_search_requests,
+            ),
+            (
+                "vampire_npm_audit_requests_total",
+                "Number of valid npm audit requests, including body and admission rejections.",
+                self.npm_audit_requests,
+            ),
+        ] {
+            let _ = writeln!(out, "# HELP {name} {help}");
+            let _ = writeln!(out, "# TYPE {name} counter");
+            let _ = writeln!(out, "{name} {count}");
+        }
         out
     }
 }

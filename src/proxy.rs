@@ -50,17 +50,22 @@ impl MetadataRewrite {
         match self {
             Self::None => "raw:v1".to_owned(),
             Self::Npm(origin) => format!("npm:v2:{origin}"),
-            Self::Pypi(origin) => format!("pypi:v1:{origin}"),
+            Self::Pypi(origin) => format!("pypi:v2:{origin}"),
         }
     }
 
     fn output_bound(&self, input_len: usize) -> usize {
+        let min_url_len = if matches!(self, Self::Pypi(_)) {
+            "/simple/".len()
+        } else {
+            MIN_REWRITABLE_URL_LEN
+        };
         match self {
             Self::None => input_len,
             Self::Npm(origin) | Self::Pypi(origin) => input_len
                 .saturating_add(
                     input_len
-                        .div_ceil(MIN_REWRITABLE_URL_LEN)
+                        .div_ceil(min_url_len)
                         .saturating_mul(origin.len().saturating_add(REWRITE_PREFIX_LEN)),
                 )
                 .min(MAX_METADATA_BODY_LEN),
@@ -146,6 +151,23 @@ impl Drop for MetadataFetchCleanup {
 }
 
 impl App {
+    pub(crate) async fn handle_npm_request(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> io::Result<Response> {
+        let response = request.send().await.map_err(io::Error::other)?;
+        let status = response.status();
+        let headers = response.headers().clone();
+        let mut reservation = self.cache().metadata_memory_reservation();
+        let body = read_metadata_body(response, &mut reservation).await?;
+        let meta = meta_for_bytes(status, &headers, body.len(), true);
+        let body = Bytes::from_owner(BufferedMetadataBody {
+            body,
+            _permit: reservation.into_permit(),
+        });
+        Ok(bytes_response(&meta, body))
+    }
+
     pub(crate) async fn handle_artifact_head(
         &self,
         upstream: reqwest::Url,
@@ -1004,11 +1026,18 @@ mod tests {
     }
 
     #[test]
-    fn rewrite_bound_accounts_for_public_origin_length() {
-        let label = "a".repeat(50);
-        let origin = format!("https://{label}.{label}.{label}.{label}.example");
-        let rewrite = MetadataRewrite::Npm(origin);
-        assert!(rewrite.output_bound(55) > 55 * 4);
+    fn rewrite_bound_covers_short_pypi_index_links() {
+        let origin = format!("https://{}.example", "a".repeat(200));
+        let body = "href='/simple/' ".repeat(100);
+        let rewrite = MetadataRewrite::Pypi(origin.clone());
+        let output = crate::routes::rewrite_pypi_html(
+            body.as_bytes(),
+            &crate::routes::RegistryOrigins::default(),
+            &origin,
+            MAX_METADATA_BODY_LEN,
+        )
+        .unwrap();
+        assert!(output.len() <= rewrite.output_bound(body.len()));
     }
 
     async fn slow_upstream(started: Arc<Notify>) -> io::Result<std::net::SocketAddr> {

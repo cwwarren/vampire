@@ -308,8 +308,14 @@ fn rewrite_pypi_href(href: &str, upstreams: &RegistryOrigins, origin: &str) -> S
             let Some(path) = canonical_rewrite_path(url.path()) else {
                 return href.to_owned();
             };
-            return format!("{origin}/{path}");
+            return format!("{origin}/pypi/{path}");
         }
+        return href.to_owned();
+    }
+    if href.starts_with("/simple/")
+        && let Some(path) = canonical_rewrite_path(href)
+    {
+        return format!("{origin}/pypi/{path}");
     }
     href.to_owned()
 }
@@ -544,6 +550,40 @@ mod tests {
         )
         .unwrap();
         assert!(rewritten.contains("https://files.pythonhosted.org/packages/pkg%2Falias.whl"));
+    }
+
+    #[test]
+    fn rewrites_pypi_simple_index_links() {
+        let upstreams = RegistryOrigins::default();
+        let body =
+            br#"<a href="/simple/rooted/">a</a><a href="https://pypi.org/simple/abs/">b</a>"#;
+        let rewritten = String::from_utf8(
+            rewrite_pypi_html(body, &upstreams, "http://localhost", MAX_METADATA_BODY_LEN).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            rewritten,
+            concat!(
+                r#"<a href="http://localhost/pypi/simple/rooted/">a</a>"#,
+                r#"<a href="http://localhost/pypi/simple/abs/">b</a>"#
+            )
+        );
+    }
+
+    #[test]
+    fn leaves_unsafe_simple_index_links_direct() {
+        let upstreams = RegistryOrigins::default();
+        let body = concat!(
+            r#"<a href="/simple/pkg/?alias=true">a</a>"#,
+            r#"<a href="/simple/pkg%2Falias/">b</a>"#,
+            r#"<a href="//pypi.org/simple/pkg/">c</a>"#
+        )
+        .as_bytes();
+        let rewritten = String::from_utf8(
+            rewrite_pypi_html(body, &upstreams, "http://localhost", MAX_METADATA_BODY_LEN).unwrap(),
+        )
+        .unwrap();
+        assert!(!rewritten.contains("http://localhost"));
     }
 
     #[test]

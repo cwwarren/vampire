@@ -49,7 +49,6 @@ Listener configuration:
 ```bash
 pip install --index-url http://127.0.0.1:8080/pypi/simple/ <package>
 npm config set registry http://127.0.0.1:8080/npm/
-npm config set audit false
 cargo add --registry crates-io <crate>
 ```
 
@@ -97,13 +96,12 @@ export UV_INSECURE_HOST=127.0.0.1
 Node with `npm`:
 ```bash
 export VAMPIRE=http://127.0.0.1:8080
-export NPM_CONFIG_USERCONFIG=/dev/null
-export NPM_CONFIG_GLOBALCONFIG=/dev/null
 export NPM_CONFIG_REGISTRY="$VAMPIRE/npm/"
-export NPM_CONFIG_AUDIT=false
 export NPM_CONFIG_FUND=false
 export NPM_CONFIG_UPDATE_NOTIFIER=false
 ```
+
+With the registry configured, `npm search <term>` and `npm audit` work through Vampire without overriding npm audit defaults. Both are uncached. Search supports text, pagination, and quality/popularity/maintenance weights. Audits send dependency names and versions to the public npm registry. Bulk-advisories and quick-audit POSTs have an 8 MiB request limit; search and audit responses have a 128 MiB limit and use the package timeout. Both share upstream admission with package downloads and metadata; rejected audit body reads return 400 and saturation returns 503. Publishing, login, and `npm audit signatures` remain unsupported.
 
 Node with `bun`:
 ```bash
@@ -136,31 +134,34 @@ Notes:
 - `pip` and `uv` need the `simple/` endpoint.
 - `npm` and `bun` need the `/npm/` endpoint.
 - Git-pinned dependencies use a separate listener on `VAMPIRE_GIT_BIND` (default `127.0.0.1:8081`). pip, uv, npm, and cargo all shell out to the system `git` binary, so `GIT_CONFIG_GLOBAL` with a `url.*.insteadOf` rewrite redirects their GitHub git traffic through vampire. Cargo requires `net.git-fetch-with-cli = true` in its config to use the system git (it defaults to its own git implementation which does not respect `GIT_CONFIG_GLOBAL`).
-- Git traffic is GitHub-only, read-only, uncached, and path-validated before forwarding. Requests forward only `Git-Protocol`, plus `Content-Type` and `Content-Encoding` on `git-upload-pack`. Responses stream through directly; `git-upload-pack` request bodies use the 8 MiB preforwarding cap.
+- Git traffic accepts both suffixless and `.git`-suffixed repository URLs, normalizing upstream paths to `.git`. It is GitHub-only, read-only, uncached, and path-validated before forwarding. Requests forward only `Git-Protocol`, plus `Content-Type` and `Content-Encoding` on `git-upload-pack`. Responses stream through directly; `git-upload-pack` request bodies use the 8 MiB preforwarding cap.
 - If you run vampire over HTTPS with a trusted certificate, drop `PIP_TRUSTED_HOST` and `UV_INSECURE_HOST`.
 - `npm` has other useful env-only toggles for sandboxes because every documented config key can be set through `NPM_CONFIG_*`.
 
 ## Operational Notes
-- Scrape Prometheus metrics from `GET /stats` on the management listener. The endpoint is synthetic, uncached, and exposes the in-memory `artifact_fetches`, `metadata_fetches`, `artifact_joins`, and `git_forwards` counters keyed by upstream type.
+- Scrape Prometheus metrics from `GET /stats` on the management listener. Package artifact/metadata fetches, artifact joins, and Git forwards are keyed by upstream type. `vampire_npm_search_requests_total` and `vampire_npm_audit_requests_total` separately count route-validated requests, including search HEAD, admission rejections, and audit body rejections. Both are unlabelled and start at zero; neither is included in package metadata counts.
 - The management listener is unauthenticated. Leave it on loopback or another trusted internal interface unless you deliberately want to expose operational metadata.
 - One vampire process must exclusively own a dedicated cache directory. Vampire writes and exclusively locks `.vampire-cache-v1`; another process using the same directory fails startup. An unmarked nonempty directory is refused unless every entry has an exact current, legacy, or recognized temp cache filename.
 - Once the ownership lock is held, every recognized cache temp is orphaned and is removed on startup; unrelated names are left untouched.
-- Artifact GET and metadata GET or HEAD misses are single-flight per representation cache key. Duplicate requests join the leader; cold artifact HEAD requests use the same capacity bound without joining. `VAMPIRE_MAX_UPSTREAM_FETCHES` bounds both classes, and excess work fails fast.
+- Artifact GET and package metadata GET or HEAD misses are single-flight per representation cache key. Duplicate requests join the leader; cold artifact HEAD, npm search, and npm audit requests use the same capacity bound without joining. Search and audit never read or write cached responses. `VAMPIRE_MAX_UPSTREAM_FETCHES` bounds all these classes, and excess work fails fast.
 - Admission saturation returns HTTP 503 without starting or queueing new unique upstream work.
 - Upstream and rewritten metadata bodies are capped at 128 MiB; upstream size uses both a `Content-Length` precheck and a streaming byte limit. Non-200 artifact bodies are capped at 1 MiB.
 - Buffered metadata has a separate 1 GiB byte-weighted reservation budget. Reservations cover reported or observed input size and bounded rewrite working space, then remain attached to the shared response bytes through delivery.
 - All cache entries are committed as one file and served through the opened entry, so replacement or eviction cannot mix headers and body bytes.
-- Rewritten npm and PyPI metadata omit upstream `ETag` and `Last-Modified` in client responses; vampire keeps those validators only for its own upstream revalidation.
-- Cached artifact HEAD mirrors cached GET headers; cold artifact HEAD forwards an upstream HEAD. Metadata HEAD uses the same cache lookup and conditional GET lifecycle as metadata GET, then discards the body.
+- Rewritten npm packuments and PyPI metadata omit upstream `ETag` and `Last-Modified` in client responses; vampire keeps those validators only for its own upstream revalidation. Search results are unmodified and retain validators. PyPI root and project links stay under `/pypi/simple/`; the updated representation refetches old cached metadata once, without invalidating cached artifacts.
+- Cached artifact HEAD mirrors cached GET headers; cold artifact HEAD forwards an upstream HEAD. Package metadata HEAD uses the same cache lookup and conditional GET lifecycle as metadata GET, then discards the body. Search HEAD fetches an uncached upstream GET and discards its body.
 - A completed entry stays pinned through response handoff, so a successful commit may remain above the cache bound until all waiters have opened it. Final pin drops request bound enforcement through one capacity-one janitor queue, coalescing bursts into at most one follow-up scan.
 - Package redirects are followed for at most 10 hops and only when scheme, host, and effective port stay unchanged; credential-bearing and HTTPS-to-HTTP redirects are rejected. Git redirects are disabled.
-- Failure logs are JSON lines on stderr with `event=request_failed`, `event=artifact_fetch_failed`, `event=startup_failed`, `event=git_rejected`, `event=git_body_read_failed`, or `event=git_stream_failed`.
+- Failure logs are JSON lines on stderr with `event=request_failed`, `event=artifact_fetch_failed`, `event=startup_failed`, `event=git_rejected`, `event=git_body_read_failed`, `event=npm_audit_body_read_failed`, or `event=git_stream_failed`.
 
 ## Test
 ```bash
 cargo test
+cargo test --test integration npm::
 cargo test --test real_e2e -- --ignored --test-threads=1 --nocapture
 ```
+
+`tests/integration/main.rs` is the single integration test target. Feature modules cover cache behavior, Cargo, Git, management metrics, npm, PyPI, and routing; `common.rs` holds the shared HTTP fixtures. Filter by module to run one area without creating separate test binaries.
 
 ## CI
 - GitHub Actions runs on `ubuntu-latest` hosted runners.

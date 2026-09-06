@@ -17,7 +17,7 @@ fn parses_stats_snapshot_body() {
         r#"# HELP vampire_artifact_fetches_total Number of upstream artifact GETs.
 # TYPE vampire_artifact_fetches_total counter
 vampire_artifact_fetches_total{upstream="pypi_files"} 2
-# HELP vampire_metadata_fetches_total Number of upstream metadata GETs.
+# HELP vampire_metadata_fetches_total Number of upstream package metadata GETs.
 # TYPE vampire_metadata_fetches_total counter
 vampire_metadata_fetches_total{upstream="pypi_simple"} 1
 # HELP vampire_artifact_joins_total Number of requests that joined an in-flight artifact fetch.
@@ -26,6 +26,8 @@ vampire_artifact_joins_total{upstream="pypi_files"} 1
 # HELP vampire_git_forwards_total Number of git requests forwarded upstream.
 # TYPE vampire_git_forwards_total counter
 vampire_git_forwards_total{upstream="github"} 3
+vampire_npm_search_requests_total 4
+vampire_npm_audit_requests_total 5
 "#,
     )
     .unwrap();
@@ -34,6 +36,8 @@ vampire_git_forwards_total{upstream="github"} 3
     assert_eq!(snapshot.metadata_fetches.get("pypi_simple"), Some(&1));
     assert_eq!(snapshot.artifact_joins.get("pypi_files"), Some(&1));
     assert_eq!(snapshot.git_forwards.get("github"), Some(&3));
+    assert_eq!(snapshot.npm_search_requests, 4);
+    assert_eq!(snapshot.npm_audit_requests, 5);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -307,7 +311,6 @@ async fn npm_git_pinned_dependency_through_proxy() {
             "NPM_CONFIG_REGISTRY",
             format!("{}/npm/", fixture.pkg_base_url),
         ),
-        ("NPM_CONFIG_AUDIT", "false".to_owned()),
         ("NPM_CONFIG_FUND", "false".to_owned()),
         ("NPM_CONFIG_PROGRESS", "false".to_owned()),
         ("NPM_CONFIG_UPDATE_NOTIFIER", "false".to_owned()),
@@ -315,7 +318,7 @@ async fn npm_git_pinned_dependency_through_proxy() {
     envs.extend(git_proxy_envs(&git_config, false));
     let install = run_command(
         "npm",
-        ["install", "--ignore-scripts", "--no-audit", "--no-fund"],
+        ["install", "--ignore-scripts", "--no-fund"],
         Some(&run_dir),
         envs,
     )
@@ -550,6 +553,17 @@ fn parse_stats_snapshot(body: &str) -> io::Result<StatsSnapshot> {
         let count = value
             .parse::<usize>()
             .map_err(|error| io::Error::other(format!("invalid stats value {value:?}: {error}")))?;
+        match sample {
+            "vampire_npm_search_requests_total" => {
+                snapshot.npm_search_requests = count;
+                continue;
+            }
+            "vampire_npm_audit_requests_total" => {
+                snapshot.npm_audit_requests = count;
+                continue;
+            }
+            _ => {}
+        }
         let (name, labels) = sample
             .split_once("{upstream=\"")
             .ok_or_else(|| io::Error::other(format!("invalid stats labels: {sample}")))?;
@@ -618,6 +632,12 @@ fn snapshot_delta(before: &StatsSnapshot, after: &StatsSnapshot) -> StatsSnapsho
         metadata_fetches: diff_counters(&before.metadata_fetches, &after.metadata_fetches),
         artifact_joins: diff_counters(&before.artifact_joins, &after.artifact_joins),
         git_forwards: diff_counters(&before.git_forwards, &after.git_forwards),
+        npm_search_requests: after
+            .npm_search_requests
+            .saturating_sub(before.npm_search_requests),
+        npm_audit_requests: after
+            .npm_audit_requests
+            .saturating_sub(before.npm_audit_requests),
     }
 }
 
@@ -700,7 +720,7 @@ async fn run_npm_install(base_url: &str, root: &Path, label: &str) -> io::Result
     .await?;
     let install = run_command(
         "npm",
-        ["install", "--ignore-scripts", "--no-audit", "--no-fund"],
+        ["install", "--ignore-scripts", "--no-fund"],
         Some(&run_dir),
         vec![
             ("HOME", home_dir.to_str().expect("utf-8 path").to_owned()),
@@ -709,7 +729,6 @@ async fn run_npm_install(base_url: &str, root: &Path, label: &str) -> io::Result
                 cache_dir.to_str().expect("utf-8 path").to_owned(),
             ),
             ("NPM_CONFIG_REGISTRY", format!("{base_url}/npm/")),
-            ("NPM_CONFIG_AUDIT", "false".to_owned()),
             ("NPM_CONFIG_FUND", "false".to_owned()),
             ("NPM_CONFIG_MAXSOCKETS", "8".to_owned()),
             ("NPM_CONFIG_PROGRESS", "false".to_owned()),
@@ -817,7 +836,7 @@ async fn run_git_clone_and_fetch(base_url: &str, root: &Path, label: &str) -> io
         "git",
         [
             "ls-remote",
-            "https://github.com/octocat/Hello-World.git",
+            "https://github.com/octocat/Hello-World",
             "HEAD",
         ],
         Some(&run_dir),
@@ -841,7 +860,7 @@ async fn run_git_clone_and_fetch(base_url: &str, root: &Path, label: &str) -> io
         [
             "clone",
             "--depth=1",
-            "https://github.com/octocat/Hello-World.git",
+            "https://github.com/octocat/Hello-World",
             repo_dir.to_str().expect("utf-8 path"),
         ],
         Some(&run_dir),

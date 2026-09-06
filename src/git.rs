@@ -329,21 +329,17 @@ fn parse_github_git_request_path(path: &str) -> Result<Option<GithubGitPath<'_>>
     }
 
     match segments.as_slice() {
-        [owner, repo_segment, "info", "refs"] => {
-            let Some(repo) = repo_segment.strip_suffix(".git") else {
-                return Ok(None);
-            };
-            Ok(GithubGitPath::new(owner, repo, GithubGitRpc::InfoRefs))
-        }
-        [owner, repo_segment, "git-upload-pack"] => {
-            let Some(repo) = repo_segment.strip_suffix(".git") else {
-                return Ok(None);
-            };
-            Ok(GithubGitPath::new(owner, repo, GithubGitRpc::UploadPack))
-        }
-        [_, repo_segment, "git-receive-pack"] if repo_segment.strip_suffix(".git").is_some() => {
-            Err(GitPathError::ReceivePack)
-        }
+        [owner, repo_segment, "info", "refs"] => Ok(GithubGitPath::new(
+            owner,
+            repo_segment.strip_suffix(".git").unwrap_or(repo_segment),
+            GithubGitRpc::InfoRefs,
+        )),
+        [owner, repo_segment, "git-upload-pack"] => Ok(GithubGitPath::new(
+            owner,
+            repo_segment.strip_suffix(".git").unwrap_or(repo_segment),
+            GithubGitRpc::UploadPack,
+        )),
+        [_, _, "git-receive-pack"] => Err(GitPathError::ReceivePack),
         _ => Ok(None),
     }
 }

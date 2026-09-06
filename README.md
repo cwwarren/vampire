@@ -76,13 +76,12 @@ export UV_INSECURE_HOST=127.0.0.1
 
 ```bash
 export VAMPIRE=http://127.0.0.1:8080
-export NPM_CONFIG_USERCONFIG=/dev/null
-export NPM_CONFIG_GLOBALCONFIG=/dev/null
 export NPM_CONFIG_REGISTRY="$VAMPIRE/npm/"
-export NPM_CONFIG_AUDIT=false
 export NPM_CONFIG_FUND=false
 export NPM_CONFIG_UPDATE_NOTIFIER=false
 ```
+
+`npm search <term>` and `npm audit` use the same registry setting and remain uncached. Audits forward dependency names and versions to npm; the examples leave npm audit defaults unchanged. Both suffixless and `.git`-suffixed GitHub dependency URLs are supported by the Git rewrite above.
 
 `bun`:
 
@@ -113,7 +112,7 @@ EOF
 
 Vampire exposes only the registry-specific paths it needs for PyPI, npm, and Cargo on its package listener, and a read-only GitHub smart-HTTP surface on its git listener for git-pinned package dependencies. The proxy keeps artifact downloads on its own URLs by rewriting PyPI and npm metadata before returning it to clients.
 
-On a cache hit, vampire serves the artifact directly from disk. On a miss, one request fetches the artifact from upstream, commits it to the cache, and then serves it; concurrent followers wait for that completed result. Artifact and metadata leaders share the `VAMPIRE_MAX_UPSTREAM_FETCHES` admission bound, and excess unique work fails fast instead of building an unbounded queue. Metadata is cached only when the upstream response includes validators such as `ETag` or `Last-Modified`, and metadata bodies are capped at 128 MiB. Every cache entry is committed as one atomically-renamed file and served through a stable open handle.
+On a cache hit, vampire serves the artifact directly from disk. On a miss, one request fetches the artifact from upstream, commits it to the cache, and then serves it; concurrent followers wait for that completed result. Artifact and metadata leaders, cold artifact HEAD requests, and uncached npm search and audit requests share the `VAMPIRE_MAX_UPSTREAM_FETCHES` admission bound, and excess work fails fast instead of building an unbounded queue. Package metadata is cached only when the upstream response includes validators such as `ETag` or `Last-Modified`. Metadata, search, and audit response bodies are capped at 128 MiB; audit POST bodies are capped at 8 MiB. Every cache entry is committed as one atomically-renamed file and served through a stable open handle.
 
 ## More
 

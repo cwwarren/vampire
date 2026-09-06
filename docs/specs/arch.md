@@ -52,7 +52,7 @@ Synchronization primitives within `CacheStore`:
 | `eviction_lock` | `Arc<tokio::sync::Mutex<()>>` | Serializes startup, metadata-write, and deferred artifact eviction scans |
 | `eviction_tx` | `tokio::sync::mpsc::Sender<Arc<std::fs::File>>` | Coalesces deferred artifact eviction requests through a capacity-one janitor queue |
 | `temp_counter` | `AtomicU64` (Relaxed) | Generates unique temp file suffixes |
-| `upstream_semaphore` | `Arc<Semaphore>` | Bounds artifact GET leaders, metadata leaders, and uncached artifact HEAD requests together (default 32) |
+| `upstream_semaphore` | `Arc<Semaphore>` | Bounds artifact GET leaders, metadata leaders, uncached artifact HEAD requests, and uncached npm search and audit requests together (default 32) |
 | `metadata_memory_semaphore` | `Arc<Semaphore>` | Tracks buffered input and bounded rewrite working space in MiB against a separate 1 GiB budget |
 | `directory_lock` | `Arc<std::fs::File>` | Holds the exclusive advisory lock on the ownership marker for the store lifetime |
 
@@ -78,6 +78,9 @@ Package routes accept GET and HEAD on the package listener:
 | `/pypi/files/{*path}` | artifact | PyPI package files |
 | `/npm/{*package}` | metadata | npm packument JSON |
 | `/npm/tarballs/{*path}` | artifact | npm tarballs |
+| `/npm/-/v1/search` | uncached | npm search JSON with allowlisted query parameters |
+
+Two additional package routes accept POST: `/npm/-/npm/v1/security/advisories/bulk` and `/npm/-/npm/v1/security/audits/quick`. Both forward uncached audit requests.
 
 The git listener routes every request through the git handler. The git surface is path-based and GitHub-only:
 
@@ -86,13 +89,15 @@ The git listener routes every request through the git handler. The git surface i
 | `/{owner}/{repo}.git/info/refs?service=git-upload-pack` | git discovery | Forward to GitHub |
 | `/{owner}/{repo}.git/git-upload-pack` | git RPC | Forward to GitHub |
 
+Both git routes also accept repository names without `.git`; forwarding canonicalizes them to `.git`. Receive-pack remains rejected in either form.
+
 The management listener is stats-only:
 
 | Path | Type | Handler |
 |---|---|---|
 | `/stats` | synthetic | Prometheus exposition for in-memory stats |
 
-Package handlers preserve the raw URI path, reject client queries, and pass only canonical relative paths to `join_url`. Validation rejects absolute paths, doubled separators, backslashes, dot segments, malformed or lowercase escapes, encoded separators, encoded unreserved aliases, query or fragment delimiters, and origin changes. Canonical safe escapes remain encoded; scoped npm packuments accept either hex case for `%2F` and normalize it to uppercase before identity and forwarding.
+Package handlers preserve the raw URI path, reject client queries except on npm search, and pass only canonical relative paths to `join_url`. Validation rejects absolute paths, doubled separators, backslashes, dot segments, malformed or lowercase escapes, encoded separators, encoded unreserved aliases, query or fragment delimiters, and origin changes. Canonical safe escapes remain encoded; scoped npm packuments accept either hex case for `%2F` and normalize it to uppercase before identity and forwarding.
 
 PyPI simple project routes accept exactly one canonical raw project segment. Literal and percent-encoded slashes are rejected locally before any upstream URL is built.
 
@@ -102,7 +107,7 @@ Git traffic stays uncached and fail-closed. The handler parses the raw request U
 
 ```
 handle_metadata(upstream, rewrite)
-  identity = raw:v1 | npm:v2:<origin> | pypi:v1:<origin>
+  identity = raw:v1 | npm:v2:<origin> | pypi:v2:<origin>
   key = hash("metadata", canonical_upstream_url, identity)
   lookup_or_start(key):
     Join → wait for the existing cold fetch or revalidation
@@ -118,6 +123,14 @@ handle_metadata(upstream, rewrite)
 
 Metadata is only cached when the upstream provides a cache validator (etag or last-modified). Cold fetches and validator revalidations are single-flight by representation cache key and share the upstream admission semaphore with artifact leaders. A separate 1 GiB memory budget reserves reported or observed input size in 1 MiB units, then reserves the bounded rewrite working set before allocation. The reservation is attached to the resulting shared `Bytes` and is released only after all response clones drop. Duplicate work joins; a unique request returns HTTP 503 when either admission bound cannot admit more work.
 For rewritten npm and PyPI metadata, vampire still stores those upstream validators for its own conditional GETs, but strips `ETag` and `Last-Modified` from the client-facing response headers because the served bytes differ from the upstream representation.
+
+### npm search and audit
+
+Search and audit bypass cache lookup, validator revalidation, cache publication, and the inflight map. Both acquire the shared upstream admission permit and use `handle_npm_request` to read a bounded response through the package client. The existing 128 MiB response limit and 1 GiB byte reservation remain in force through delivery; uncached requests still need resource limits.
+
+Search accepts only `text`, `size`, `from`, `quality`, `popularity`, and `maintenance` query keys. GET and HEAD both fetch an unconditional upstream GET; HEAD discards the body. The query is forwarded but never forms a cache key, and result bodies are not rewritten.
+
+Audit accepts only the bulk-advisories and quick-audit POST paths, rejects queries, and acquires its permit before reading the request body. Bodies are buffered up to 8 MiB without decompression; invalid or oversized bodies return 400 and emit `npm_audit_body_read_failed`. Only `Content-Type` and `Content-Encoding` are forwarded, so gzip works without forwarding credentials.
 
 ### Artifact path
 
@@ -162,7 +175,7 @@ git request
 
 ### HEAD path
 
-Artifact HEAD checks the artifact cache and otherwise sends an upstream HEAD. Metadata HEAD uses the same single-flight cache lookup and conditional GET lifecycle as metadata GET, then discards the body.
+Artifact HEAD checks the artifact cache and otherwise sends an upstream HEAD. Metadata HEAD uses the same single-flight cache lookup and conditional GET lifecycle as metadata GET, then discards the body. Search HEAD instead runs an uncached upstream GET and discards the body.
 
 On miss:
 - artifact paths send a real upstream HEAD and preserve the upstream `Content-Length`
@@ -178,7 +191,7 @@ artifact: hash("artifact", canonical_upstream_url)
 metadata: hash("metadata", canonical_upstream_url, representation_identity)
 ```
 
-The canonical upstream URL excludes query and fragment. Metadata representation identities are `raw:v1`, `npm:v2:<origin>`, and `pypi:v1:<origin>`. Including the rewrite origin prevents a persistent cache from serving URLs generated for an older `VAMPIRE_PUBLIC_BASE_URL`. Keys are SHA-256 hex strings; the first 2 hex characters are the shard directory name.
+The canonical upstream URL used for cache identity excludes queries and fragments. Metadata representation identities are `raw:v1`, `npm:v2:<origin>`, and `pypi:v2:<origin>`. Including the rewrite origin prevents a persistent cache from serving URLs generated for an older `VAMPIRE_PUBLIC_BASE_URL`. PyPI v2 invalidates pages cached before the Simple API link fix; old entries expire through normal eviction. Search and audit do not create cache keys; previously cached search entries are no longer read and remain subject to normal eviction. Keys are SHA-256 hex strings; the first 2 hex characters are the shard directory name.
 
 ### Directory layout
 
@@ -272,7 +285,7 @@ The proxy rewrites upstream metadata responses to redirect artifact downloads th
 
 Regex-matches all `href="..."` and `href='...'` attributes. For each:
 - URLs matching the configured `pypi_files` origin or hostname `files.pythonhosted.org` → `{VAMPIRE_PUBLIC_BASE_URL}/pypi/files/{relative_path}` (preserving `#hash` fragments)
-- URLs matching the configured `pypi_simple` origin or hostname `pypi.org`, with path starting `/simple/` → `{VAMPIRE_PUBLIC_BASE_URL}{path}` (strips host, keeps path)
+- URLs matching the configured `pypi_simple` origin or hostname `pypi.org`, with path starting `/simple/`, and root-relative `/simple/...` links → `{VAMPIRE_PUBLIC_BASE_URL}/pypi{path}` after canonical path validation
 - Other URLs → unchanged
 
 Rewritten PyPI responses do not forward upstream `ETag` or `Last-Modified` headers to clients.
@@ -283,7 +296,7 @@ Keeps unrelated packument values as borrowed raw JSON and materializes only the 
 - URLs matching the configured `npm` origin or hostname `registry.npmjs.org` → `{VAMPIRE_PUBLIC_BASE_URL}/npm/tarballs/{relative_path}`
 - Other URLs → unchanged
 
-Rewritten npm responses do not forward upstream `ETag` or `Last-Modified` headers to clients.
+Rewritten npm packuments do not forward upstream `ETag` or `Last-Modified` headers to clients. Search results are raw metadata and retain upstream validators.
 
 ### Cargo
 
@@ -303,16 +316,19 @@ Events:
 - `artifact_fetch_failed` — background fetch task error (with `stage`, `upstream`, `cache_key`, `error`)
 - `git_rejected` — rejected Git request (with `method`, `path`, `query`, `status`, `message`)
 - `git_body_read_failed` — rejected Git request body (with `method`, `path`, `error`)
+- `npm_audit_body_read_failed` — rejected npm audit request body (with `method`, `path`, `error`)
 - `git_stream_failed` — Git response stream failure (with `method`, `upstream`, `error`)
 
 ## Stats
 
-`AppStats` tracks four counters, all keyed by upstream type (six fixed values):
+`AppStats` tracks four counters keyed by upstream type (six fixed values):
 - `artifact_fetches` — incremented per upstream artifact GET
-- `metadata_fetches` — incremented per upstream metadata GET (including revalidation)
+- `metadata_fetches` — incremented per upstream package metadata GET, including revalidation but excluding search and audit
 - `artifact_joins` — incremented when a request deduplicates against an in-progress fetch
 - `git_forwards` — incremented per forwarded git request to GitHub
 
+Two scalar counters, `npm_search_requests` and `npm_audit_requests`, count requests after method, path, and query validation, before admission or body processing. They include search HEAD, saturation responses, and rejected audit bodies, but exclude invalid routes or queries. `/stats` always emits `vampire_npm_search_requests_total` and `vampire_npm_audit_requests_total`, initially zero, without labels.
+
 Upstream types: `pypi_files`, `pypi_simple`, `npm`, `cargo_download`, `cargo_index`, `github`.
 
-Exposed via `App::stats() -> &AppStats` with `snapshot()`, `reset()`, and `render_prometheus()` methods. `/stats` on the management listener renders the current stats snapshot in Prometheus text exposition format with one sample per `(metric, upstream type)` pair, bounding cardinality to 24 time series max (4 metrics × 6 upstreams).
+Exposed via `App::stats() -> &AppStats` with `snapshot()`, `reset()`, and `render_prometheus()` methods. `/stats` renders one sample per `(metric, upstream type)` pair plus the two scalar npm counters, bounding cardinality to 26 time series max (4 metrics × 6 upstreams + 2).

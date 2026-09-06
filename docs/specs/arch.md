@@ -2,6 +2,8 @@
 
 Vampire is a single-process async Rust HTTP proxy that caches package artifacts and metadata for three registries: PyPI, npm, and Cargo. A second listener on the same process proxies read-only GitHub smart-HTTP traffic for git-pinned package dependencies, and a third management listener exposes Prometheus-formatted in-memory stats. Built on tokio + axum + reqwest.
 
+Local builds, CI, and the Docker builder pin Rust 1.98.1; `Cargo.toml` declares the same minimum version. The heavy checks use nightly only for unused-dependency analysis.
+
 ## Module structure
 
 ```

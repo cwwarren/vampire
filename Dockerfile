@@ -1,7 +1,7 @@
 FROM rust:1-alpine AS builder
 RUN apk add --no-cache musl-dev
 WORKDIR /work
-COPY Cargo.toml Cargo.lock ./
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY src ./src
 RUN cargo build --locked --release --bin vampire
 

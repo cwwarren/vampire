@@ -13,6 +13,10 @@
 - Publish and login APIs
 - Shared-cache multi-process coordination
 
+## Build Toolchain
+- Rust 1.98.1 is the minimum supported version and the pinned compiler for local builds, CI, and the container builder.
+- `rust-toolchain.toml` selects Rust 1.98.1 with rustfmt and Clippy. Unused-dependency analysis uses a separate nightly toolchain.
+
 ## Public Surface
 - Package listener on `VAMPIRE_PKG_BIND`:
 - `GET|HEAD /pypi/simple/`

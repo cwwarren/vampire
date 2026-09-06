@@ -1,6 +1,8 @@
 # Vampire Usage
 
 ## Start
+Rustup selects Rust 1.98.1 from `rust-toolchain.toml`. CI uses the same version. The Docker builder copies this toolchain file into the Alpine Rust image, so Cargo installs and uses 1.98.1 even before a matching official image tag is published.
+
 ```bash
 VAMPIRE_PUBLIC_BASE_URL=http://127.0.0.1:8080 \
 VAMPIRE_MAX_CACHE_SIZE_MB=10000 \
